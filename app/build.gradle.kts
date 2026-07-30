@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.coroutines.android)
     implementation(libs.bouncycastle)
     implementation(libs.markwon.core)
+    implementation(libs.androidx.core.ktx)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.json)

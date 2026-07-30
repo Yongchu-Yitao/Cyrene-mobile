@@ -72,15 +72,51 @@ class SecureStore(context: Context) {
     }
 
     fun savePeer(peer: Peer) {
-        preferences.edit().putString("peer", peer.toJson().toString()).apply()
+        val updated = (peers().filterNot { it.deviceId == peer.deviceId } + peer)
+        preferences.edit()
+            .putString("peers", JSONArray(updated.map { it.toJson() }).toString())
+            .putString("active_peer_id", peer.deviceId)
+            .remove("peer")
+            .apply()
     }
 
-    fun peer(): Peer? = preferences.getString("peer", null)?.let {
-        runCatching { JSONObject(it).toPeer() }.getOrNull()
+    fun peers(): List<Peer> {
+        val stored = preferences.getString("peers", null)
+        if (stored != null) {
+            return runCatching {
+                val array = JSONArray(stored)
+                (0 until array.length()).mapNotNull { index ->
+                    runCatching { array.getJSONObject(index).toPeer() }.getOrNull()
+                }.distinctBy(Peer::deviceId)
+            }.getOrDefault(emptyList())
+        }
+        return preferences.getString("peer", null)?.let {
+            runCatching { listOf(JSONObject(it).toPeer()) }.getOrNull()
+        }.orEmpty()
     }
 
-    fun clearPeer() {
-        preferences.edit().remove("peer").apply()
+    fun peer(): Peer? {
+        val savedPeers = peers()
+        val activeId = preferences.getString("active_peer_id", null)
+        return savedPeers.firstOrNull { it.deviceId == activeId } ?: savedPeers.firstOrNull()
+    }
+
+    fun selectPeer(deviceId: String) {
+        require(peers().any { it.deviceId == deviceId })
+        preferences.edit().putString("active_peer_id", deviceId).apply()
+    }
+
+    fun clearPeer(deviceId: String) {
+        val remaining = peers().filterNot { it.deviceId == deviceId }
+        val editor = preferences.edit()
+            .putString("peers", JSONArray(remaining.map { it.toJson() }).toString())
+            .remove("peer")
+        val currentActiveId = preferences.getString("active_peer_id", null)
+        if (currentActiveId == deviceId || remaining.none { it.deviceId == currentActiveId }) {
+            remaining.firstOrNull()?.let { editor.putString("active_peer_id", it.deviceId) }
+                ?: editor.remove("active_peer_id")
+        }
+        editor.apply()
     }
 
     fun uiTheme(): String = preferences.getString("ui_theme", "system")

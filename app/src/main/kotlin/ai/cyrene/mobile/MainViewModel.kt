@@ -30,12 +30,16 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.time.Instant
 import java.util.Base64
+import java.util.UUID
 
 data class MobileUiState(
     val peer: Peer? = null,
+    val peers: List<Peer> = emptyList(),
     val pairingOffer: PairingOffer? = null,
     val busy: Boolean = false,
+    val creatingChat: Boolean = false,
     val backgroundSyncing: Boolean = false,
     val backgroundSyncProgress: Float = 0f,
     val error: String? = null,
@@ -47,12 +51,25 @@ data class MobileUiState(
     val tasks: List<JSONObject> = emptyList(),
     val selectedTask: JSONObject? = null,
     val artifacts: List<JSONObject> = emptyList(),
+    val selectedChangeDiff: JSONObject? = null,
+    val changeDiffLoading: Boolean = false,
+    val viewerFile: JSONObject? = null,
+    val viewerFilePath: String? = null,
+    val viewerMimeType: String? = null,
+    val viewerLoading: Boolean = false,
+    val inlineAttachmentPaths: Map<String, String> = emptyMap(),
+    val inlineAttachmentLoading: Set<String> = emptySet(),
+    val inlineAttachmentErrors: Set<String> = emptySet(),
+    val fullImagePaths: Map<String, String> = emptyMap(),
+    val fullImageLoading: Set<String> = emptySet(),
+    val fullImageErrors: Set<String> = emptySet(),
     val downloadProgress: Map<String, Float> = emptyMap(),
     val downloadedFiles: List<String> = emptyList(),
     val runEvents: List<JSONObject> = emptyList(),
     val activeRunId: String? = null,
     val terminalLines: List<String> = emptyList(),
     val terminalPrompt: String = "$",
+    val terminalCwd: String = ".",
     val terminalBusy: Boolean = false,
     val terminalSessionId: String? = null,
     val terminalSessionStatus: String = "disconnected",
@@ -75,8 +92,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun text(id: Int, vararg args: Any): String =
         getApplication<Application>().getString(id, *args)
 
-    private fun initialState(peer: Peer? = null) = MobileUiState(
+    private fun initialState(
+        peer: Peer? = null,
+        peers: List<Peer> = store.peers(),
+    ) = MobileUiState(
         peer = peer,
+        peers = peers,
         status = text(R.string.status_not_connected),
         terminalLines = emptyList(),
         uiTheme = store.uiTheme(),
@@ -91,6 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalCommandSent = false
     private var terminalOutputStarted = false
     private var terminalPrompt = "$"
+    private var deviceLoadJob: Job? = null
     private var backgroundSyncJob: Job? = null
     private val cacheMutex = Mutex()
     @Volatile
@@ -101,11 +123,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restoreCacheAndRefresh(peer: Peer) {
-        viewModelScope.launch(Dispatchers.IO) {
+        deviceLoadJob = viewModelScope.launch(Dispatchers.IO) {
             desktopDataCache.load(peer.deviceId)?.let { snapshot ->
+                ensureCurrentPeer(peer)
                 cachedData = snapshot
                 applyCachedSnapshot(snapshot)
             }
+            ensureCurrentPeer(peer)
             _state.value = _state.value.copy(
                 busy = true,
                 error = null,
@@ -114,16 +138,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { loadProjects(peer) }
                 .onSuccess { startBackgroundSync(peer) }
                 .onFailure { error ->
-                    _state.value = _state.value.copy(
-                        error = error.message ?: text(R.string.error_generic),
-                        status = if (cachedData.projects.isEmpty()) {
-                            text(R.string.status_need_attention)
-                        } else {
-                            text(R.string.status_cached_projects, cachedData.projects.size)
-                        },
-                    )
+                    if (error !is CancellationException &&
+                        _state.value.peer?.deviceId == peer.deviceId
+                    ) {
+                        _state.value = _state.value.copy(
+                            error = error.message ?: text(R.string.error_generic),
+                            status = if (cachedData.projects.isEmpty()) {
+                                text(R.string.status_need_attention)
+                            } else {
+                                text(R.string.status_cached_projects, cachedData.projects.size)
+                            },
+                        )
+                    }
                 }
-            _state.value = _state.value.copy(busy = false)
+            if (_state.value.peer?.deviceId == peer.deviceId) {
+                _state.value = _state.value.copy(busy = false)
+            }
         }
     }
 
@@ -140,11 +170,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val offer = requireNotNull(_state.value.pairingOffer)
         val peer = client.complete(offer)
         store.savePeer(peer)
+        cancelActiveDeviceWork()
         cachedData = DesktopDataSnapshot()
-        _state.value = _state.value.copy(
-            peer = peer,
-            pairingOffer = null,
+        _state.value = initialState(peer, store.peers()).copy(
             status = text(R.string.status_connected, peer.name),
+            busy = true,
         )
         loadProjects(peer)
         startBackgroundSync(peer)
@@ -153,12 +183,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelPairing() {
         _state.value = _state.value.copy(
             pairingOffer = null,
-            status = text(R.string.status_not_connected),
+            status = _state.value.peer?.let { text(R.string.status_connected, it.name) }
+                ?: text(R.string.status_not_connected),
         )
     }
 
     fun forgetDevice() {
         val peerId = _state.value.peer?.deviceId
+        cancelActiveDeviceWork()
+        if (peerId != null) {
+            store.clearPeer(peerId)
+        }
+        cachedData = DesktopDataSnapshot()
+        if (peerId != null) {
+            viewModelScope.launch(Dispatchers.IO) { desktopDataCache.clear(peerId) }
+        }
+        val nextPeer = store.peer()
+        _state.value = initialState(nextPeer, store.peers())
+        nextPeer?.let(::restoreCacheAndRefresh)
+    }
+
+    fun selectDevice(peer: Peer) {
+        if (_state.value.peer?.deviceId == peer.deviceId) return
+        cancelActiveDeviceWork()
+        store.selectPeer(peer.deviceId)
+        cachedData = DesktopDataSnapshot()
+        _state.value = initialState(peer, store.peers()).copy(
+            status = text(R.string.status_connected, peer.name),
+        )
+        restoreCacheAndRefresh(peer)
+    }
+
+    private fun cancelActiveDeviceWork() {
+        deviceLoadJob?.cancel()
+        deviceLoadJob = null
         backgroundSyncJob?.cancel()
         backgroundSyncJob = null
         terminalPollJob?.cancel()
@@ -168,16 +226,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         terminalCommandSent = false
         terminalOutputStarted = false
         terminalPrompt = "$"
-        store.clearPeer()
-        cachedData = DesktopDataSnapshot()
-        if (peerId != null) {
-            viewModelScope.launch(Dispatchers.IO) { desktopDataCache.clear(peerId) }
-        }
-        _state.value = initialState()
     }
 
     fun setUiTheme(value: String) {
         store.saveUiTheme(value)
+        syncApplicationNightMode(getApplication(), value)
         _state.value = _state.value.copy(uiTheme = value)
     }
 
@@ -261,6 +314,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadProjects(peer: Peer) {
         val result = client.command(peer, "projects.list")
+        ensureCurrentPeer(peer)
         val projects = result.optJSONArray("projects").objects()
         updateCache(peer.deviceId) { previous -> previous.copy(projects = projects) }
         val previousProjectId = _state.value.selectedProject?.optString("id").orEmpty()
@@ -312,6 +366,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .optJSONArray("chats").objects()
         val tasks = client.command(peer, "tasks.list", projectId)
             .optJSONArray("tasks").objects()
+        ensureCurrentPeer(peer)
         updateCache(peer.deviceId) { previous ->
             previous.copy(
                 projectData = previous.projectData + (
@@ -358,21 +413,165 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedChat = null,
             runEvents = emptyList(),
             activeRunId = null,
+            selectedChangeDiff = null,
+            viewerFile = null,
+            viewerFilePath = null,
+            viewerMimeType = null,
+            viewerLoading = false,
         )
     }
 
-    fun createChat() = projectCommand(text(R.string.status_creating_chat)) { peer, projectId ->
-        val result = client.command(
-            peer, "chats.create", projectId,
-            JSONObject().put("title", ""),
-        )
-        reloadChats(peer, projectId)
-        result.optJSONObject("chat")?.let { chat ->
+    fun sendNewChatMessage(
+        message: String,
+        planMode: Boolean,
+        attachments: List<PendingAttachment> = emptyList(),
+    ) {
+        if (_state.value.creatingChat) return
+        val content = message.trim()
+        if (content.isBlank()) return
+        val peer = _state.value.peer ?: return
+        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        if (projectId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
             _state.value = _state.value.copy(
-                selectedChat = chat,
-                runEvents = emptyList(),
-                activeRunId = null,
+                creatingChat = true,
+                error = null,
+                status = text(R.string.status_sending_agent),
             )
+            runCatching {
+                val result = client.command(
+                    peer, "chats.create", projectId,
+                    JSONObject().put("title", ""),
+                )
+                reloadChats(peer, projectId)
+                val chat = requireNotNull(result.optJSONObject("chat")) {
+                    text(R.string.error_generic)
+                }
+                ensureCurrentPeer(peer)
+                check(_state.value.selectedProject?.optString("id") == projectId)
+                _state.value = _state.value.copy(
+                    selectedChat = chat,
+                    runEvents = emptyList(),
+                    activeRunId = null,
+                    selectedChangeDiff = null,
+                    viewerFile = null,
+                    viewerFilePath = null,
+                    viewerMimeType = null,
+                    viewerLoading = false,
+                )
+                sendMessageCommand(
+                    peer = peer,
+                    projectId = projectId,
+                    chat = chat,
+                    content = content,
+                    planMode = planMode,
+                    attachments = attachments,
+                )
+            }.onFailure { error ->
+                if (_state.value.peer?.deviceId == peer.deviceId) {
+                    _state.value = _state.value.copy(
+                        error = error.message ?: text(R.string.error_generic),
+                        status = text(R.string.status_need_attention),
+                    )
+                }
+            }
+            if (_state.value.peer?.deviceId == peer.deviceId) {
+                _state.value = _state.value.copy(creatingChat = false)
+            }
+        }
+    }
+
+    fun renameChat(chat: JSONObject, requestedTitle: String) {
+        val peer = _state.value.peer ?: return
+        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        val chatId = chat.optString("id")
+        val title = requestedTitle.trim()
+        if (projectId.isBlank() || chatId.isBlank() || title.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(busy = true, error = null)
+            runCatching {
+                val result = client.command(
+                    peer,
+                    "chats.update",
+                    projectId,
+                    JSONObject()
+                        .put("chat_id", chatId)
+                        .put("title", title),
+                )
+                val updatedChat = result.optJSONObject("chat")
+                reloadChats(peer, projectId)
+                updatedChat
+            }.onSuccess { updatedChat ->
+                if (
+                    updatedChat != null &&
+                    _state.value.selectedChat?.optString("id") == chatId
+                ) {
+                    updateCache(peer.deviceId) { previous ->
+                        previous.copy(
+                            chatDetails = previous.chatDetails + (chatId to updatedChat),
+                        )
+                    }
+                    _state.value = _state.value.copy(selectedChat = updatedChat)
+                }
+            }.onFailure { error ->
+                if (_state.value.peer?.deviceId == peer.deviceId) {
+                    _state.value = _state.value.copy(
+                        error = error.message ?: text(R.string.error_generic),
+                        status = text(R.string.status_need_attention),
+                    )
+                }
+            }
+            if (_state.value.peer?.deviceId == peer.deviceId) {
+                _state.value = _state.value.copy(busy = false)
+            }
+        }
+    }
+
+    fun deleteChat(chat: JSONObject) {
+        val peer = _state.value.peer ?: return
+        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        val chatId = chat.optString("id")
+        if (projectId.isBlank() || chatId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(busy = true, error = null)
+            runCatching {
+                client.command(
+                    peer,
+                    "chats.delete",
+                    projectId,
+                    JSONObject().put("chat_id", chatId),
+                )
+                updateCache(peer.deviceId) { previous ->
+                    previous.copy(chatDetails = previous.chatDetails - chatId)
+                }
+                reloadChats(peer, projectId)
+                if (_state.value.selectedChat?.optString("id") == chatId) {
+                    val nextChat = _state.value.chats.firstOrNull()
+                    _state.value = _state.value.copy(
+                        selectedChat = null,
+                        runEvents = emptyList(),
+                        activeRunId = null,
+                        selectedChangeDiff = null,
+                        viewerFile = null,
+                        viewerFilePath = null,
+                        viewerMimeType = null,
+                        viewerLoading = false,
+                    )
+                    if (nextChat != null) {
+                        loadChat(peer, projectId, nextChat, clearEvents = true)
+                    }
+                }
+            }.onFailure { error ->
+                if (_state.value.peer?.deviceId == peer.deviceId) {
+                    _state.value = _state.value.copy(
+                        error = error.message ?: text(R.string.error_generic),
+                        status = text(R.string.status_need_attention),
+                    )
+                }
+            }
+            if (_state.value.peer?.deviceId == peer.deviceId) {
+                _state.value = _state.value.copy(busy = false)
+            }
         }
     }
 
@@ -384,6 +583,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 selectedChat = cached,
                 runEvents = emptyList(),
                 activeRunId = null,
+                selectedChangeDiff = null,
+                viewerFile = null,
+                viewerFilePath = null,
+                viewerMimeType = null,
+                viewerLoading = false,
             )
             refreshChatInBackground(chat)
             return
@@ -397,39 +601,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         message: String,
         planMode: Boolean,
         attachments: List<PendingAttachment> = emptyList(),
-    ) =
+    ) {
+        val content = message.trim()
+        val chat = _state.value.selectedChat ?: return
+        val chatId = chat.optString("id")
+        if (chatId.isBlank()) return
         projectCommand(text(R.string.status_sending_agent)) { peer, projectId ->
-            val chat = requireNotNull(_state.value.selectedChat)
-            val encodedAttachments = encodeAttachments(attachments)
-            val result = client.command(
+            sendMessageCommand(
+                peer = peer,
+                projectId = projectId,
+                chat = chat,
+                content = content,
+                planMode = planMode,
+                attachments = attachments,
+            )
+        }
+    }
+
+    private suspend fun sendMessageCommand(
+        peer: Peer,
+        projectId: String,
+        chat: JSONObject,
+        content: String,
+        planMode: Boolean,
+        attachments: List<PendingAttachment>,
+    ) {
+        val chatId = chat.getString("id")
+        val localMessageId = "local_" + UUID.randomUUID().toString().replace("-", "")
+        if (content.isNotBlank()) {
+            updateLocalUserMessage(
+                chatId = chatId,
+                messageId = localMessageId,
+                content = content,
+                deliveryState = "sending",
+            )
+        }
+        _state.value = _state.value.copy(
+            runEvents = emptyList(),
+            activeRunId = null,
+            error = null,
+        )
+        val encodedAttachments = encodeAttachments(attachments)
+        val result = try {
+            client.command(
                 peer, "chats.send", projectId,
                 JSONObject()
-                    .put("chat_id", chat.getString("id"))
-                    .put("message", message.trim())
+                    .put("chat_id", chatId)
+                    .put("message", content)
                     .put("attachments", encodedAttachments)
                     .put("permission_mode", if (planMode) "plan" else "default")
                     .put("language", "zh"),
                 timeoutSeconds = 50,
             )
-            val runId = result.optString("run_id").ifBlank {
-                result.optJSONObject("run")?.optString("run_id").orEmpty()
-            }
-            _state.value = _state.value.copy(activeRunId = runId.ifBlank { null })
-            loadChat(peer, projectId, chat, clearEvents = false)
-            if (runId.isNotBlank()) {
-                viewModelScope.launch(Dispatchers.IO) {
-                    runCatching { pollRun(peer, projectId, runId) }
-                        .onFailure { error ->
-                            _state.value = _state.value.copy(
-                                error = error.message ?: text(R.string.error_run_monitor_interrupted),
-                                activeRunId = null,
-                                status = text(R.string.status_run_monitor_interrupted),
-                            )
-                        }
-                    runCatching { loadChat(peer, projectId, chat, clearEvents = false) }
+        } catch (error: Exception) {
+            markLocalUserMessageDelivery(chatId, localMessageId, "failed")
+            throw error
+        }
+        markLocalUserMessageDelivery(chatId, localMessageId, "sent")
+        val runId = result.optString("run_id").ifBlank {
+            result.optJSONObject("run")?.optString("run_id").orEmpty()
+        }
+        _state.value = _state.value.copy(activeRunId = runId.ifBlank { null })
+        loadChat(peer, projectId, chat, clearEvents = false)
+        if (runId.isNotBlank()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { pollRun(peer, projectId, runId) }
+                    .onFailure { error ->
+                        _state.value = _state.value.copy(
+                            error = error.message ?: text(R.string.error_run_monitor_interrupted),
+                            activeRunId = null,
+                            status = text(R.string.status_run_monitor_interrupted),
+                        )
+                    }
+                runCatching { loadChat(peer, projectId, chat, clearEvents = false) }
                 }
             }
-        }
+    }
 
     private suspend fun pollRun(peer: Peer, projectId: String, runId: String) {
         var cursor = 0
@@ -460,20 +707,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             consecutiveFailures = 0
             val events = result.optJSONArray("events").objects()
             cursor = result.optInt("next_cursor", cursor)
+            val mergedEvents = (_state.value.runEvents + events)
+                .distinctBy { "${it.optInt("cursor")}:${it.optString("type")}" }
+            val runError = mergedEvents.lastOrNull { it.optString("type") == "error" }
+            val completed = result.optBoolean("completed")
             _state.value = _state.value.copy(
-                runEvents = (_state.value.runEvents + events)
-                    .distinctBy { "${it.optInt("cursor")}:${it.optString("type")}" },
-                status = if (result.optBoolean("completed")) {
-                    text(R.string.status_run_completed)
-                } else {
-                    text(R.string.status_agent_running)
+                runEvents = mergedEvents,
+                status = when {
+                    runError != null -> text(R.string.status_run_failed)
+                    completed -> text(R.string.status_run_completed)
+                    else -> text(R.string.status_agent_running)
                 },
             )
-            if (result.optBoolean("completed")) {
+            if (completed) {
                 _state.value = _state.value.copy(activeRunId = null)
                 return
             }
         }
+    }
+
+    private fun updateLocalUserMessage(
+        chatId: String,
+        messageId: String,
+        content: String,
+        deliveryState: String,
+    ) {
+        val current = _state.value.selectedChat ?: return
+        if (current.optString("id") != chatId) return
+        val updated = JSONObject(current.toString())
+        val messages = updated.optJSONArray("messages") ?: JSONArray().also {
+            updated.put("messages", it)
+        }
+        messages.put(
+            JSONObject()
+                .put("id", messageId)
+                .put("role", "user")
+                .put("content", content)
+                .put("createdAt", Instant.now().toString())
+                .put("deliveryState", deliveryState),
+        )
+        updated.put("updatedAt", Instant.now().toString())
+        updated.put("preview", content)
+        _state.value = _state.value.copy(selectedChat = updated)
+    }
+
+    private fun markLocalUserMessageDelivery(
+        chatId: String,
+        messageId: String,
+        deliveryState: String,
+    ) {
+        val current = _state.value.selectedChat ?: return
+        if (current.optString("id") != chatId) return
+        val updated = JSONObject(current.toString())
+        val messages = updated.optJSONArray("messages") ?: return
+        for (index in 0 until messages.length()) {
+            val item = messages.optJSONObject(index) ?: continue
+            if (item.optString("id") == messageId) {
+                item.put("deliveryState", deliveryState)
+                break
+            }
+        }
+        _state.value = _state.value.copy(selectedChat = updated)
     }
 
     fun guideRun(message: String) = projectCommand(text(R.string.status_guiding)) { peer, projectId ->
@@ -696,6 +990,259 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
+    fun loadChangeDiff(changeSet: JSONObject, file: JSONObject) =
+        projectCommand(text(R.string.status_loading_change)) { peer, projectId ->
+            _state.value = _state.value.copy(
+                changeDiffLoading = true,
+                selectedChangeDiff = null,
+            )
+            try {
+                val result = client.command(
+                    peer,
+                    "changes.read",
+                    projectId,
+                    JSONObject()
+                        .put("chat_id", requireNotNull(_state.value.selectedChat).getString("id"))
+                        .put("change_set_id", changeSet.getString("id"))
+                        .put("file_path", file.getString("path")),
+                )
+                _state.value = _state.value.copy(
+                    selectedChangeDiff = result.optJSONObject("change"),
+                )
+            } finally {
+                _state.value = _state.value.copy(changeDiffLoading = false)
+            }
+        }
+
+    fun previewChatAttachment(file: JSONObject) =
+        projectCommand(text(R.string.status_loading_preview)) { peer, projectId ->
+            val chatId = requireNotNull(_state.value.selectedChat).getString("id")
+            val attachmentId = file.getString("id")
+            val safeName = file.optString("name", "file")
+                .replace(Regex("""[\\/:*?"<>|\u0000-\u001f]"""), "_")
+                .take(160).ifBlank { "file" }
+            val directory = File(getApplication<Application>().filesDir, "viewer")
+                .apply { mkdirs() }
+            val target = File(directory, "${attachmentId.takeLast(10)}-$safeName")
+            val part = File(directory, "${target.name}.part")
+            _state.value = _state.value.copy(
+                viewerFile = file,
+                viewerFilePath = null,
+                viewerMimeType = file.optString("content_type"),
+                viewerLoading = true,
+            )
+            try {
+                var offset = 0L
+                var total = Long.MAX_VALUE
+                var mediaType = file.optString("content_type")
+                FileOutputStream(part, false).use { output ->
+                    while (offset < total) {
+                        val chunk = client.command(
+                            peer,
+                            "attachments.read",
+                            projectId,
+                            JSONObject()
+                                .put("chat_id", chatId)
+                                .put("attachment_id", attachmentId)
+                                .put("offset", offset)
+                                .put("limit", 512 * 1024),
+                            timeoutSeconds = 55,
+                        )
+                        val chunkOffset = chunk.getLong("offset")
+                        val chunkSize = chunk.getInt("chunk_size")
+                        val nextOffset = chunk.getLong("next_offset")
+                        total = chunk.getLong("size")
+                        require(chunkOffset == offset) { text(R.string.error_download_offset) }
+                        val bytes = Base64.getDecoder().decode(chunk.getString("content_base64"))
+                        require(bytes.size == chunkSize) { text(R.string.error_download_chunk_length) }
+                        require(nextOffset == offset + chunkSize && nextOffset <= total) {
+                            text(R.string.error_download_bounds)
+                        }
+                        output.write(bytes)
+                        offset = nextOffset
+                        mediaType = chunk.optString("media_type", mediaType)
+                        if (chunk.optBoolean("eof")) break
+                    }
+                    output.fd.sync()
+                }
+                if (target.exists()) target.delete()
+                require(part.renameTo(target)) { text(R.string.error_publish_download) }
+                _state.value = _state.value.copy(
+                    viewerFilePath = target.absolutePath,
+                    viewerMimeType = mediaType,
+                )
+            } finally {
+                _state.value = _state.value.copy(viewerLoading = false)
+            }
+        }
+
+    fun loadInlineChatImage(file: JSONObject) = loadChatImage(file, thumbnail = true)
+
+    fun loadFullChatImage(file: JSONObject) = loadChatImage(file, thumbnail = false)
+
+    private fun loadChatImage(file: JSONObject, thumbnail: Boolean) {
+        val attachmentId = file.optString("id")
+        val peer = _state.value.peer ?: return
+        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        val chatId = _state.value.selectedChat?.optString("id").orEmpty()
+        val cacheKey = "$chatId::$attachmentId"
+        val paths = if (thumbnail) {
+            _state.value.inlineAttachmentPaths
+        } else {
+            _state.value.fullImagePaths
+        }
+        val loading = if (thumbnail) {
+            _state.value.inlineAttachmentLoading
+        } else {
+            _state.value.fullImageLoading
+        }
+        if (
+            attachmentId.isBlank() || projectId.isBlank() || chatId.isBlank() ||
+            cacheKey in loading ||
+            paths[cacheKey]?.let(::File)?.exists() == true
+        ) {
+            return
+        }
+        _state.value = if (thumbnail) {
+            _state.value.copy(
+                inlineAttachmentLoading =
+                    _state.value.inlineAttachmentLoading + cacheKey,
+                inlineAttachmentErrors =
+                    _state.value.inlineAttachmentErrors - cacheKey,
+            )
+        } else {
+            _state.value.copy(
+                fullImageLoading = _state.value.fullImageLoading + cacheKey,
+                fullImageErrors = _state.value.fullImageErrors - cacheKey,
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val safeName = file.optString("name", "image")
+                .replace(Regex("""[\\/:*?"<>|\u0000-\u001f]"""), "_")
+                .take(160).ifBlank { "image" }
+            val cacheRoot = File(
+                getApplication<Application>().filesDir,
+                if (thumbnail) "inline-thumbnails" else "inline-images",
+            )
+            val safePeerId = peer.deviceId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+                .take(80).ifBlank { "peer" }
+            val safeChatId = chatId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+                .take(80).ifBlank { "chat" }
+            val directory = File(File(cacheRoot, safePeerId), safeChatId).apply { mkdirs() }
+            val target = File(
+                directory,
+                "${attachmentId.takeLast(18)}-${if (thumbnail) "thumb-" else ""}$safeName",
+            )
+            runCatching {
+                if (!target.exists() || target.length() == 0L) {
+                    downloadChatAttachment(
+                        peer = peer,
+                        projectId = projectId,
+                        chatId = chatId,
+                        attachmentId = attachmentId,
+                        target = target,
+                        variant = if (thumbnail) "thumbnail" else "original",
+                    )
+                }
+                require(target.length() > 0L) { text(R.string.error_publish_download) }
+                target.absolutePath
+            }.onSuccess { path ->
+                _state.value = if (thumbnail) {
+                    _state.value.copy(
+                        inlineAttachmentPaths =
+                            _state.value.inlineAttachmentPaths + (cacheKey to path),
+                        inlineAttachmentLoading =
+                            _state.value.inlineAttachmentLoading - cacheKey,
+                        inlineAttachmentErrors =
+                            _state.value.inlineAttachmentErrors - cacheKey,
+                    )
+                } else {
+                    _state.value.copy(
+                        fullImagePaths =
+                            _state.value.fullImagePaths + (cacheKey to path),
+                        fullImageLoading =
+                            _state.value.fullImageLoading - cacheKey,
+                        fullImageErrors =
+                            _state.value.fullImageErrors - cacheKey,
+                    )
+                }
+            }.onFailure {
+                _state.value = if (thumbnail) {
+                    _state.value.copy(
+                        inlineAttachmentLoading =
+                            _state.value.inlineAttachmentLoading - cacheKey,
+                        inlineAttachmentErrors =
+                            _state.value.inlineAttachmentErrors + cacheKey,
+                    )
+                } else {
+                    _state.value.copy(
+                        fullImageLoading =
+                            _state.value.fullImageLoading - cacheKey,
+                        fullImageErrors =
+                            _state.value.fullImageErrors + cacheKey,
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun downloadChatAttachment(
+        peer: Peer,
+        projectId: String,
+        chatId: String,
+        attachmentId: String,
+        target: File,
+        variant: String,
+    ) {
+        val part = File(target.parentFile, "${target.name}.part")
+        var offset = 0L
+        var total = Long.MAX_VALUE
+        FileOutputStream(part, false).use { output ->
+            while (offset < total) {
+                val chunk = client.command(
+                    peer,
+                    "attachments.read",
+                    projectId,
+                    JSONObject()
+                        .put("chat_id", chatId)
+                        .put("attachment_id", attachmentId)
+                        .put("variant", variant)
+                        .put("offset", offset)
+                        .put("limit", 512 * 1024),
+                    timeoutSeconds = 55,
+                )
+                val chunkOffset = chunk.getLong("offset")
+                val chunkSize = chunk.getInt("chunk_size")
+                val nextOffset = chunk.getLong("next_offset")
+                total = chunk.getLong("size")
+                require(chunkOffset == offset) { text(R.string.error_download_offset) }
+                val bytes = Base64.getDecoder().decode(chunk.getString("content_base64"))
+                require(bytes.size == chunkSize) { text(R.string.error_download_chunk_length) }
+                require(nextOffset == offset + chunkSize && nextOffset <= total) {
+                    text(R.string.error_download_bounds)
+                }
+                output.write(bytes)
+                offset = nextOffset
+                if (chunk.optBoolean("eof")) {
+                    require(offset == total) { text(R.string.error_download_end) }
+                    break
+                }
+            }
+            output.fd.sync()
+        }
+        if (target.exists()) target.delete()
+        require(part.renameTo(target)) { text(R.string.error_publish_download) }
+    }
+
+    fun clearViewer() {
+        _state.value = _state.value.copy(
+            viewerFile = null,
+            viewerFilePath = null,
+            viewerMimeType = null,
+            viewerLoading = false,
+        )
+    }
+
     fun ensureTerminalShell(force: Boolean = false) {
         val peer = _state.value.peer ?: return
         val project = _state.value.selectedProject ?: return
@@ -737,6 +1284,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(
                     terminalLines = emptyList(),
                     terminalPrompt = terminalPrompt,
+                    terminalCwd = result.optString("cwd", "."),
                     terminalSessionId = result.getString("shell_id"),
                     terminalSessionStatus = result.optString("status", "running"),
                     status = text(R.string.status_terminal_connected),
@@ -757,7 +1305,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendTerminalCommand(input: String) {
-        val command = input.trim()
+        val command = input.trimEnd()
         if (command.isBlank() || _state.value.terminalBusy) return
         if (command.equals("clear", ignoreCase = true)) {
             _state.value = _state.value.copy(
@@ -785,7 +1333,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 terminalCommandSent = true
                 val result = client.command(
-                    peer, "shell.write", projectId,
+                    peer,
+                    "shell.write",
+                    projectId,
                     JSONObject()
                         .put("shell_id", shellId)
                         .put("input", command)
@@ -807,6 +1357,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             _state.value = _state.value.copy(terminalBusy = false)
+        }
+    }
+
+    fun clearTerminalOutput() {
+        _state.value = _state.value.copy(terminalLines = emptyList())
+    }
+
+    fun interruptTerminal() {
+        val peer = _state.value.peer ?: return
+        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        val shellId = _state.value.terminalSessionId ?: return
+        if (
+            projectId.isBlank() ||
+            terminalProjectId != projectId ||
+            _state.value.terminalSessionStatus != "running"
+        ) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val result = client.command(
+                    peer,
+                    "shell.interrupt",
+                    projectId,
+                    JSONObject()
+                        .put("shell_id", shellId)
+                        .put("cursor", terminalCursor),
+                    timeoutSeconds = 12,
+                )
+                applyTerminalSnapshot(result)
+                _state.value = _state.value.copy(
+                    terminalSessionStatus = result.optString("status", "running"),
+                    status = text(R.string.status_terminal_connected),
+                )
+            }.onFailure { error ->
+                appendTerminalError(error)
+                _state.value = _state.value.copy(
+                    error = error.message ?: text(R.string.error_remote_execution),
+                    status = text(R.string.status_terminal_failed),
+                )
+            }
         }
     }
 
@@ -881,13 +1470,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 line.optString("text")
             }
-        }
+        }.map(::cleanTerminalText)
+        _state.value = _state.value.copy(
+            terminalCwd = result.optString("cwd", _state.value.terminalCwd),
+        )
         if (terminalCommandSent && additions.isNotEmpty()) {
             _state.value = _state.value.copy(
                 terminalLines = (_state.value.terminalLines + additions).takeLast(500),
             )
         }
     }
+
+    private fun cleanTerminalText(value: String): String =
+        value
+            .replace(Regex("\\x1B\\[[0-?]*[ -/]*[@-~]"), "")
+            .replace('\r', ' ')
+            .trimEnd()
 
     private fun appendTerminalError(error: Throwable) {
         val message = "[${text(R.string.terminal_error)}] " +
@@ -923,6 +1521,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             terminalSessionId = null,
             terminalSessionStatus = "disconnected",
             terminalPrompt = "$",
+            terminalCwd = ".",
         )
     }
 
@@ -1268,6 +1867,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        deviceLoadJob?.cancel()
         backgroundSyncJob?.cancel()
         terminalPollJob?.cancel()
         client.close()

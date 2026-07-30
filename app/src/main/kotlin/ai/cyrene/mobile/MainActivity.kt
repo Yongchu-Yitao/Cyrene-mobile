@@ -3,14 +3,24 @@ package ai.cyrene.mobile
 import android.app.Activity
 import android.app.LocaleManager
 import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
 import android.os.Bundle
 import android.os.Build
 import android.os.LocaleList
+import android.os.ParcelFileDescriptor
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.method.LinkMovementMethod
+import android.view.KeyEvent as AndroidKeyEvent
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,9 +28,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -35,6 +50,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -56,6 +74,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -79,6 +98,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,35 +108,52 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.CheckCircleOutline
@@ -129,9 +166,15 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.content.FileProvider
+import ai.cyrene.mobile.data.ApkUpdateDownloader
 import ai.cyrene.mobile.data.SecureStore
+import ai.cyrene.mobile.data.GithubUpdateService
+import ai.cyrene.mobile.data.UpdateCheckResult
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import io.noties.markwon.Markwon
 import org.json.JSONArray
 import org.json.JSONObject
@@ -139,7 +182,10 @@ import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.io.File
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun attachBaseContext(newBase: Context) {
@@ -180,7 +226,10 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun StartupScreen() {
-    Surface(Modifier.fillMaxSize(), color = Color(0xFFF8F8FC)) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+    ) {
         Column(
             Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -219,6 +268,14 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
                 primary = Color(0xFFB8C4FF),
                 onPrimary = Color(0xFF10225D),
                 primaryContainer = Color(0xFF293E7A),
+                secondary = Color(0xFFCEBDFA),
+                onSecondary = Color(0xFF35275A),
+                secondaryContainer = Color(0xFF4C3E72),
+                onSecondaryContainer = Color(0xFFEBDDFF),
+                tertiary = Color(0xFF8CD4A8),
+                onTertiary = Color(0xFF00391E),
+                tertiaryContainer = Color(0xFF15512F),
+                onTertiaryContainer = Color(0xFFA7F2C3),
                 background = Color(0xFF111318),
                 surface = Color(0xFF191B20),
             )
@@ -227,7 +284,14 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
                 primary = Color(0xFF4059AD),
                 onPrimary = Color.White,
                 primaryContainer = Color(0xFFDDE2FF),
-                secondary = Color(0xFF5C5F72),
+                secondary = Color(0xFF67548B),
+                onSecondary = Color.White,
+                secondaryContainer = Color(0xFFF2ECFF),
+                onSecondaryContainer = Color(0xFF2A1B4D),
+                tertiary = Color(0xFF2D6A45),
+                onTertiary = Color.White,
+                tertiaryContainer = Color(0xFFD7F4E1),
+                onTertiaryContainer = Color(0xFF103821),
                 background = Color(0xFFF8F8FC),
                 surface = Color(0xFFFFFFFF),
             )
@@ -236,7 +300,7 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
     if (state.peer == null) {
@@ -244,172 +308,435 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
         return
     }
     var tab by remember { mutableIntStateOf(2) }
+    var settingsPageId by remember { mutableStateOf<String?>(null) }
+    var showAddDevice by remember { mutableStateOf(false) }
+    LaunchedEffect(state.peer.deviceId) {
+        showAddDevice = false
+    }
+    if (showAddDevice) {
+        PairingScreen(
+            state = state,
+            model = model,
+            onClose = {
+                model.cancelPairing()
+                showAddDevice = false
+            },
+        )
+        return
+    }
     val tabs = listOf(
         DrawerDestination(0, stringResource(R.string.nav_devices), Icons.Outlined.Devices),
         DrawerDestination(2, stringResource(R.string.nav_chats), Icons.Outlined.ChatBubbleOutline),
         DrawerDestination(3, stringResource(R.string.nav_tasks), Icons.Outlined.CheckCircleOutline),
         DrawerDestination(4, stringResource(R.string.nav_terminal), Icons.Outlined.Terminal),
-        DrawerDestination(5, stringResource(R.string.nav_settings), Icons.Outlined.Settings),
     )
-    val recentSessions = remember(state.chats, state.tasks) {
+    val aboutAndUpdatesLabel = stringResource(R.string.settings_update_title)
+    val sessions = remember(state.chats, state.tasks) {
         (
             state.chats.map { RecentSession("chat", it) } +
                 state.tasks.map { RecentSession("task", it) }
             )
             .sortedByDescending { recentSessionTimestamp(it.data) }
-            .take(8)
     }
+    var chatMenuTarget by remember { mutableStateOf<JSONObject?>(null) }
+    var renameChatTarget by remember { mutableStateOf<JSONObject?>(null) }
+    var deleteChatTarget by remember { mutableStateOf<JSONObject?>(null) }
+    var renameChatTitle by remember { mutableStateOf("") }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val rightPanelAvailable =
+        (tab == 2 && state.selectedChat != null) ||
+            (tab == 3 && state.selectedTask != null)
+    var rightPanelOpen by remember { mutableStateOf(false) }
+    var rightPanelDragging by remember { mutableStateOf(false) }
+    var rightPanelRevealPx by remember { mutableFloatStateOf(0f) }
+    var suppressLeftDrawerGestures by remember { mutableStateOf(false) }
+    val rightPanelWidth = minOf(
+        360.dp,
+        LocalConfiguration.current.screenWidthDp.dp * .9f,
+    )
+    val leftPanelWidth = minOf(
+        320.dp,
+        LocalConfiguration.current.screenWidthDp.dp * .82f,
+    )
+    val rightPanelWidthPx = with(LocalDensity.current) { rightPanelWidth.toPx() }
+    LaunchedEffect(
+        tab,
+        state.selectedChat?.optString("id"),
+        state.selectedTask?.optString("id"),
+    ) {
+        if (tab != 5) settingsPageId = null
+        rightPanelOpen = false
+        rightPanelDragging = false
+        rightPanelRevealPx = 0f
+        suppressLeftDrawerGestures = false
+    }
+    BackHandler(enabled = tab == 5 && settingsPageId != null) {
+        settingsPageId = null
+    }
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled =
+            !rightPanelOpen && !rightPanelDragging && !suppressLeftDrawerGestures,
         drawerContent = {
-            ModalDrawerSheet(modifier = Modifier.widthIn(max = 320.dp)) {
-                Column(
-                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 22.dp),
-                ) {
-                    Text(
-                        "Cyrene",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                LazyColumn(
-                    modifier = Modifier.fillMaxHeight(),
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    items(tabs, key = { it.screen }) { destination ->
-                        NavigationDrawerItem(
-                            label = { Text(destination.label) },
-                            selected = tab == destination.screen,
-                            onClick = {
-                                tab = destination.screen
-                                if (destination.screen == 2) {
-                                    model.showChatList()
+            ModalDrawerSheet(modifier = Modifier.width(leftPanelWidth)) {
+                Box(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxSize()) {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 22.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .semantics(mergeDescendants = true) {
+                                        contentDescription = aboutAndUpdatesLabel
+                                    }
+                                    .clickable {
+                                        rightPanelOpen = false
+                                        settingsPageId = "about"
+                                        tab = 5
+                                        scope.launch { drawerState.close() }
+                                    },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Image(
+                                    painter = painterResource(
+                                        R.drawable.ic_launcher_full,
+                                    ),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(50.dp),
+                                )
+                                Spacer(Modifier.width(14.dp))
+                                Text(
+                                    "Cyrene",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxHeight(),
+                            contentPadding = PaddingValues(
+                                start = 12.dp,
+                                end = 12.dp,
+                                bottom = 104.dp,
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(tabs, key = { it.screen }) { destination ->
+                                NavigationDrawerItem(
+                                    label = { Text(destination.label) },
+                                    selected = tab == destination.screen,
+                                    onClick = {
+                                        rightPanelOpen = false
+                                        tab = destination.screen
+                                        if (destination.screen == 2) {
+                                            model.showChatList()
+                                        }
+                                        scope.launch { drawerState.close() }
+                                    },
+                                    icon = {
+                                        Icon(
+                                            destination.icon,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                )
+                            }
+                            item {
+                                HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                                Text(
+                                    stringResource(R.string.menu_recent_sessions),
+                                    modifier = Modifier.padding(
+                                        horizontal = 16.dp,
+                                        vertical = 4.dp,
+                                    ),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (sessions.isEmpty()) {
+                                item {
+                                    Text(
+                                        stringResource(R.string.menu_no_recent_sessions),
+                                        modifier = Modifier.padding(
+                                            horizontal = 16.dp,
+                                            vertical = 12.dp,
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
                                 }
-                                scope.launch { drawerState.close() }
+                            } else {
+                                items(
+                                    items = sessions,
+                                    key = { "${it.kind}-${it.data.optString("id")}" },
+                                ) { session ->
+                                    val data = session.data
+                                    val itemId = data.optString("id")
+                                    val isChat = session.kind == "chat"
+                                    val selected = if (isChat) {
+                                            tab == 2 &&
+                                                state.selectedChat?.optString("id") == itemId
+                                        } else {
+                                            tab == 3 &&
+                                                state.selectedTask?.optString("id") == itemId
+                                        }
+                                    val openSession = {
+                                        chatMenuTarget = null
+                                        rightPanelOpen = false
+                                        if (isChat) {
+                                            tab = 2
+                                            if (
+                                                state.selectedChat?.optString("id") != itemId
+                                            ) {
+                                                model.openChat(data)
+                                            }
+                                        } else {
+                                            tab = 3
+                                            if (
+                                                state.selectedTask?.optString("id") != itemId
+                                            ) {
+                                                model.openTask(data)
+                                            }
+                                        }
+                                        scope.launch { drawerState.close() }
+                                        Unit
+                                    }
+                                    Box {
+                                        RecentSessionDrawerItem(
+                                            data = data,
+                                            isChat = isChat,
+                                            selected = selected,
+                                            onClick = openSession,
+                                            onLongClick = if (isChat) {
+                                                {
+                                                    chatMenuTarget = data
+                                                }
+                                            } else {
+                                                null
+                                            },
+                                        )
+                                        DropdownMenu(
+                                            expanded =
+                                                isChat &&
+                                                    chatMenuTarget?.optString("id") == itemId,
+                                            onDismissRequest = { chatMenuTarget = null },
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        stringResource(
+                                                            R.string.chat_menu_rename
+                                                        )
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        Icons.Outlined.Edit,
+                                                        contentDescription = null,
+                                                    )
+                                                },
+                                                onClick = {
+                                                    chatMenuTarget = null
+                                                    renameChatTitle = data.optString("title")
+                                                    renameChatTarget = data
+                                                },
+                                            )
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        stringResource(
+                                                            R.string.chat_menu_delete
+                                                        )
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        Icons.Outlined.DeleteSweep,
+                                                        contentDescription = null,
+                                                    )
+                                                },
+                                                onClick = {
+                                                    chatMenuTarget = null
+                                                    deleteChatTarget = data
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (state.selectedProject != null) {
+                        ExtendedFloatingActionButton(
+                            onClick = {
+                                if (!state.busy) {
+                                    rightPanelOpen = false
+                                    model.showChatList()
+                                    tab = 2
+                                    scope.launch { drawerState.close() }
+                                }
                             },
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .navigationBarsPadding()
+                                .padding(20.dp)
+                                .height(56.dp),
+                            shape = RoundedCornerShape(28.dp),
                             icon = {
                                 Icon(
-                                    destination.icon,
-                                    contentDescription = null,
+                                    Icons.Outlined.Edit,
+                                    contentDescription =
+                                        stringResource(R.string.chat_create_new),
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            },
+                            text = {
+                                Text(
+                                    stringResource(R.string.drawer_new_chat_label),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
                                 )
                             },
                         )
                     }
-                    item {
-                        HorizontalDivider(Modifier.padding(vertical = 14.dp))
-                        Text(
-                            stringResource(R.string.menu_recent_sessions),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    FloatingActionButton(
+                        onClick = {
+                            rightPanelOpen = false
+                            settingsPageId = null
+                            tab = 5
+                            scope.launch { drawerState.close() }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .navigationBarsPadding()
+                            .padding(20.dp),
+                        shape = CircleShape,
+                    ) {
+                        Icon(
+                            Icons.Outlined.Settings,
+                            contentDescription = stringResource(R.string.nav_settings),
                         )
-                    }
-                    if (recentSessions.isEmpty()) {
-                        item {
-                            Text(
-                                stringResource(R.string.menu_no_recent_sessions),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    } else {
-                        items(
-                            items = recentSessions,
-                            key = { "${it.kind}-${it.data.optString("id")}" },
-                        ) { session ->
-                            val data = session.data
-                            val itemId = data.optString("id")
-                            val isChat = session.kind == "chat"
-                            NavigationDrawerItem(
-                                label = {
-                                    Column {
-                                        Text(
-                                            data.optString(
-                                                "title",
-                                                stringResource(
-                                                    if (isChat) R.string.chat_unnamed
-                                                    else R.string.task_unnamed,
-                                                ),
-                                            ),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        Text(
-                                            if (isChat) {
-                                                stringResource(
-                                                    R.string.menu_chat_summary,
-                                                    data.optInt("message_count"),
-                                                    localizedStatus(data.optString("status")),
-                                                )
-                                            } else {
-                                                stringResource(
-                                                    R.string.menu_task_summary,
-                                                    localizedStatus(data.optString("status")),
-                                                )
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                },
-                                selected = if (isChat) {
-                                    tab == 2 && state.selectedChat?.optString("id") == itemId
-                                } else {
-                                    tab == 3 && state.selectedTask?.optString("id") == itemId
-                                },
-                                onClick = {
-                                    if (isChat) {
-                                        tab = 2
-                                        if (state.selectedChat?.optString("id") != itemId) {
-                                            model.openChat(data)
-                                        }
-                                    } else {
-                                        tab = 3
-                                        if (state.selectedTask?.optString("id") != itemId) {
-                                            model.openTask(data)
-                                        }
-                                    }
-                                    scope.launch { drawerState.close() }
-                                },
-                                icon = {
-                                    Icon(
-                                        if (isChat) Icons.Outlined.ChatBubbleOutline
-                                        else Icons.Outlined.CheckCircleOutline,
-                                        contentDescription = null,
-                                    )
-                                },
-                            )
-                        }
                     }
                 }
             }
         },
     ) {
-        Scaffold(
+        Box(
+            Modifier
+                .fillMaxSize()
+                .then(
+                    if (drawerState.targetValue == DrawerValue.Closed) {
+                        Modifier.pointerInput(
+                            rightPanelAvailable,
+                            rightPanelOpen,
+                            rightPanelWidthPx,
+                        ) {
+                            var dragDistance = 0f
+                            detectHorizontalDragGestures(
+                        onDragStart = {
+                            dragDistance = 0f
+                            rightPanelRevealPx = if (rightPanelOpen) rightPanelWidthPx else 0f
+                            if (rightPanelOpen) suppressLeftDrawerGestures = true
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            dragDistance += dragAmount
+                            val canDragRightPanel =
+                                rightPanelAvailable &&
+                                    drawerState.currentValue == DrawerValue.Closed
+                            val handlingRightPanel = canDragRightPanel && (
+                                rightPanelDragging ||
+                                    (rightPanelOpen && dragDistance > 4f) ||
+                                    (!rightPanelOpen && dragDistance < -4f)
+                                )
+                            if (handlingRightPanel) {
+                                rightPanelDragging = true
+                                rightPanelRevealPx = if (rightPanelOpen) {
+                                    (rightPanelWidthPx - dragDistance)
+                                        .coerceIn(0f, rightPanelWidthPx)
+                                } else {
+                                    (-dragDistance).coerceIn(0f, rightPanelWidthPx)
+                                }
+                                change.consume()
+                            }
+                        },
+                        onDragEnd = {
+                            if (rightPanelDragging) {
+                                rightPanelOpen = if (rightPanelOpen) {
+                                    rightPanelRevealPx >= rightPanelWidthPx * .65f
+                                } else {
+                                    rightPanelRevealPx >= rightPanelWidthPx * .28f
+                                }
+                                rightPanelRevealPx =
+                                    if (rightPanelOpen) rightPanelWidthPx else 0f
+                            }
+                            rightPanelDragging = false
+                            if (suppressLeftDrawerGestures) {
+                                scope.launch {
+                                    delay(180)
+                                    suppressLeftDrawerGestures = false
+                                }
+                            }
+                            dragDistance = 0f
+                        },
+                        onDragCancel = {
+                            rightPanelRevealPx =
+                                if (rightPanelOpen) rightPanelWidthPx else 0f
+                            rightPanelDragging = false
+                            if (suppressLeftDrawerGestures) {
+                                scope.launch {
+                                    delay(180)
+                                    suppressLeftDrawerGestures = false
+                                }
+                            }
+                            dragDistance = 0f
+                        },
+                            )
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
+            Scaffold(
             topBar = {
                 TopAppBar(
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(
-                                Icons.Outlined.Menu,
-                                contentDescription = stringResource(R.string.menu_open),
-                            )
+                        if (tab == 5 && settingsPageId != null) {
+                            IconButton(onClick = { settingsPageId = null }) {
+                                Icon(
+                                    Icons.AutoMirrored.Outlined.ArrowBack,
+                                    contentDescription = stringResource(R.string.action_back),
+                                )
+                            }
+                        } else {
+                            IconButton(onClick = {
+                                rightPanelOpen = false
+                                scope.launch { drawerState.open() }
+                            }) {
+                                Icon(
+                                    Icons.Outlined.Menu,
+                                    contentDescription = stringResource(R.string.menu_open),
+                                )
+                            }
                         }
                     },
                     title = {
-                        val title = if (tab == 2 && state.selectedChat != null) {
-                            state.selectedChat.optString("title")
-                                .takeIf(String::isNotBlank)
-                                ?: stringResource(R.string.chat_unnamed)
+                        val title = if (tab == 2) {
+                            state.selectedChat?.optString("title")
+                                ?.takeIf(String::isNotBlank)
+                                ?: stringResource(R.string.chat_new)
                         } else {
-                            tabs.firstOrNull { it.screen == tab }?.label
-                                ?: stringResource(R.string.app_name)
+                            if (tab == 5) {
+                                settingsPageTitle(settingsPageId, state.desktopSettingsSchema)
+                            } else {
+                                tabs.firstOrNull { it.screen == tab }?.label
+                                    ?: stringResource(R.string.app_name)
+                            }
                         }
                         Text(
                             title,
@@ -422,53 +749,133 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                         containerColor = MaterialTheme.colorScheme.surface.copy(alpha = .96f)
                     ),
                     actions = {
-                        if (state.busy) {
+                        if (state.busy && !(tab == 2 && state.selectedChat == null)) {
                             CircularProgressIndicator(Modifier.padding(16.dp).width(22.dp))
                         }
                     },
                 )
             },
-            floatingActionButton = {
-                if (tab == 2 && state.selectedProject != null && state.selectedChat == null) {
-                    FloatingActionButton(
-                        onClick = {
-                            if (!state.busy) {
-                                model.createChat()
-                            }
-                        },
-                        shape = CircleShape,
-                    ) {
-                        Icon(
-                            Icons.Outlined.Add,
-                            contentDescription = stringResource(R.string.chat_create_new),
+            ) { padding ->
+                Box(Modifier.padding(padding).fillMaxSize()) {
+                    when (tab) {
+                        0 -> DeviceScreen(state, model) { showAddDevice = true }
+                        1 -> ProjectScreen(state, model) { tab = 2 }
+                        2 -> ChatScreen(state, model)
+                        3 -> TaskScreen(state, model)
+                        4 -> TerminalScreen(state, model)
+                        else -> SettingsScreen(
+                            state = state,
+                            model = model,
+                            pageId = settingsPageId,
+                            onOpenPage = { settingsPageId = it },
+                        )
+                    }
+                    state.error?.let { error ->
+                        AlertDialog(
+                            onDismissRequest = model::dismissError,
+                            confirmButton = {
+                                Button(onClick = model::dismissError) {
+                                    Text(stringResource(R.string.action_ok))
+                                }
+                            },
+                            title = { Text(stringResource(R.string.error_title)) },
+                            text = { Text(error) },
                         )
                     }
                 }
-            },
-        ) { padding ->
-            Box(Modifier.padding(padding).fillMaxSize()) {
-                when (tab) {
-                    0 -> DeviceScreen(state, model)
-                    1 -> ProjectScreen(state, model) { tab = 2 }
-                    2 -> ChatScreen(state, model)
-                    3 -> TaskScreen(state, model)
-                    4 -> TerminalScreen(state, model)
-                    else -> SettingsScreen(state, model)
-                }
-                state.error?.let { error ->
-                    AlertDialog(
-                        onDismissRequest = model::dismissError,
-                        confirmButton = {
-                            Button(onClick = model::dismissError) {
-                                Text(stringResource(R.string.action_ok))
-                            }
+            }
+            if ((rightPanelOpen || rightPanelDragging) && rightPanelAvailable) {
+                val rightPanelProgress =
+                    (rightPanelRevealPx / rightPanelWidthPx).coerceIn(0f, 1f)
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = .42f * rightPanelProgress))
+                        .clickable(enabled = rightPanelOpen && !rightPanelDragging) {
+                            rightPanelOpen = false
+                            rightPanelRevealPx = 0f
                         },
-                        title = { Text(stringResource(R.string.error_title)) },
-                        text = { Text(error) },
-                    )
-                }
+                )
+                DesktopRightSidebar(
+                    state = state,
+                    model = model,
+                    screen = tab,
+                    onClose = {
+                        rightPanelOpen = false
+                        rightPanelRevealPx = 0f
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .offset {
+                            IntOffset(
+                                x = (rightPanelWidthPx - rightPanelRevealPx).roundToInt(),
+                                y = 0,
+                            )
+                        }
+                        .fillMaxHeight()
+                        .width(rightPanelWidth),
+                )
             }
         }
+    }
+    renameChatTarget?.let { chat ->
+        AlertDialog(
+            onDismissRequest = { renameChatTarget = null },
+            title = { Text(stringResource(R.string.chat_rename_title)) },
+            text = {
+                OutlinedTextField(
+                    value = renameChatTitle,
+                    onValueChange = { renameChatTitle = it.take(60) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(stringResource(R.string.chat_rename_label)) },
+                    singleLine = true,
+                )
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { renameChatTarget = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = renameChatTitle.isNotBlank() && !state.busy,
+                    onClick = {
+                        model.renameChat(chat, renameChatTitle)
+                        renameChatTarget = null
+                    },
+                ) {
+                    Text(stringResource(R.string.action_save))
+                }
+            },
+        )
+    }
+    deleteChatTarget?.let { chat ->
+        val chatTitle = chat.optString("title").ifBlank {
+            stringResource(R.string.chat_unnamed)
+        }
+        AlertDialog(
+            onDismissRequest = { deleteChatTarget = null },
+            title = { Text(stringResource(R.string.chat_delete_title)) },
+            text = {
+                Text(stringResource(R.string.chat_delete_message, chatTitle))
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { deleteChatTarget = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !state.busy,
+                    onClick = {
+                        model.deleteChat(chat)
+                        deleteChatTarget = null
+                    },
+                ) {
+                    Text(stringResource(R.string.action_delete))
+                }
+            },
+        )
     }
 }
 
@@ -483,6 +890,71 @@ private data class RecentSession(
     val data: JSONObject,
 )
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecentSessionDrawerItem(
+    data: JSONObject,
+    isChat: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+) {
+    val fallbackTitle = stringResource(
+        if (isChat) R.string.chat_unnamed else R.string.task_unnamed,
+    )
+    val shape = RoundedCornerShape(28.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(
+                if (selected) MaterialTheme.colorScheme.secondaryContainer
+                else Color.Transparent,
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            .heightIn(min = 64.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (isChat) Icons.Outlined.ChatBubbleOutline
+            else Icons.Outlined.CheckCircleOutline,
+            contentDescription = null,
+            modifier = Modifier.size(26.dp),
+        )
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                data.optString("title").ifBlank { fallbackTitle },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Text(
+                if (isChat) {
+                    stringResource(
+                        R.string.menu_chat_summary,
+                        data.optInt("message_count"),
+                        localizedStatus(data.optString("status")),
+                    )
+                } else {
+                    stringResource(
+                        R.string.menu_task_summary,
+                        localizedStatus(data.optString("status")),
+                    )
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
 private fun recentSessionTimestamp(item: JSONObject): Long {
     val raw = item.optString("updated_at")
         .ifBlank { item.optString("updatedAt") }
@@ -493,7 +965,1677 @@ private fun recentSessionTimestamp(item: JSONObject): Long {
 }
 
 @Composable
-private fun PairingScreen(state: MobileUiState, model: MainViewModel) {
+private fun DesktopRightSidebar(
+    state: MobileUiState,
+    model: MainViewModel,
+    screen: Int,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val chat = state.selectedChat
+    val task = state.selectedTask
+    val plan = if (screen == 2) chat?.optJSONObject("active_plan") else null
+    val chatFiles = remember(chat) {
+        buildList {
+            val messages = chat?.optJSONArray("messages")
+            if (messages != null) {
+                for (messageIndex in 0 until messages.length()) {
+                    val message = messages.optJSONObject(messageIndex) ?: continue
+                    val role = message.optString("role")
+                    val attachments = message.optJSONArray("attachments") ?: continue
+                    for (fileIndex in 0 until attachments.length()) {
+                        attachments.optJSONObject(fileIndex)?.let { add(role to it) }
+                    }
+                }
+            }
+        }
+    }
+    val chatBranches = remember(chat, state.chats) {
+        relatedChatBranches(chat, state.chats)
+    }
+    val subagents = chat?.optJSONObject("subagents")
+    val changes = chat?.optJSONObject("changes")
+    val mapData = chat?.optJSONObject("map")
+    val hasSubagents = (subagents?.optJSONArray("rounds")?.length() ?: 0) > 0 ||
+        (subagents?.optJSONArray("agents")?.length() ?: 0) > 0
+    val hasChanges = (changes?.optJSONArray("changeSets")?.length() ?: 0) > 0
+    val hasMap = (mapData?.optJSONArray("pins")?.length() ?: 0) > 0 ||
+        (mapData?.optJSONArray("routes")?.length() ?: 0) > 0
+    val tabs = buildList {
+        add("overview" to stringResource(R.string.right_sidebar_overview))
+        val hasPlan = if (screen == 2) {
+            plan != null
+        } else {
+            (task?.optJSONArray("plan")?.length() ?: 0) > 0
+        }
+        if (hasPlan) add("plan" to stringResource(R.string.right_sidebar_plan))
+        if (screen == 2 && hasSubagents) {
+            add("subagents" to stringResource(R.string.right_sidebar_subagents))
+        }
+        add("context" to stringResource(R.string.right_sidebar_context))
+        val hasArtifacts = if (screen == 2) chatFiles.isNotEmpty() else state.artifacts.isNotEmpty()
+        if (hasArtifacts) add("artifacts" to stringResource(R.string.right_sidebar_artifacts))
+        if (screen == 2 && hasChanges) {
+            add("changes" to stringResource(R.string.right_sidebar_changes))
+        }
+        if (screen == 2 && chatBranches.size > 1) {
+            add("branches" to stringResource(R.string.right_sidebar_branches))
+        }
+        if (screen == 2 && state.viewerFile != null) {
+            add("viewer" to stringResource(R.string.right_sidebar_viewer))
+        }
+        if (screen == 2 && hasMap) {
+            add("map" to stringResource(R.string.right_sidebar_map))
+        }
+    }
+    var selectedTab by remember(
+        screen,
+        chat?.optString("id"),
+        task?.optString("id"),
+    ) { mutableStateOf("overview") }
+    LaunchedEffect(state.viewerFile, state.viewerFilePath) {
+        if (state.viewerFile != null) selectedTab = "viewer"
+    }
+    val activeTab = selectedTab.takeIf { id -> tabs.any { it.first == id } } ?: "overview"
+
+    Surface(
+        modifier = modifier,
+        color = if (MaterialTheme.colorScheme.background.luminance() < .5f) {
+            Color(0xFF141F31)
+        } else {
+            MaterialTheme.colorScheme.background
+        },
+        contentColor = rightSidebarContentColor(),
+        tonalElevation = 0.dp,
+    ) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                tabs.forEach { (id, label) ->
+                    Column(
+                        Modifier
+                            .clickable { selectedTab = id }
+                            .padding(horizontal = 10.dp, vertical = 15.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (activeTab == id) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        HorizontalDivider(
+                            thickness = 2.dp,
+                            color = if (activeTab == id) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.Transparent
+                            },
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onClose) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = stringResource(R.string.right_sidebar_close),
+                    )
+                }
+            }
+            HorizontalDivider()
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                when (activeTab) {
+                    "plan" -> item {
+                        RightSidebarPlan(
+                            plan = if (screen == 2) {
+                                plan?.optJSONArray("steps")
+                            } else {
+                                task?.optJSONArray("plan")
+                            },
+                            title = if (screen == 2) plan?.optString("title").orEmpty() else "",
+                            summary = if (screen == 2) plan?.optString("summary").orEmpty() else "",
+                        )
+                    }
+                    "context" -> item {
+                        if (screen == 2) {
+                            RightSidebarChatContext(state)
+                        } else {
+                            RightSidebarTaskContext(state)
+                        }
+                    }
+                    "artifacts" -> {
+                        if (screen == 2) {
+                            items(chatFiles, key = {
+                                "${it.second.optString("id")}:${it.second.optString("name")}"
+                            }) { (role, file) ->
+                                RightSidebarFile(
+                                    file = file,
+                                    userUpload = role == "user",
+                                    onClick = { model.previewChatAttachment(file) },
+                                )
+                            }
+                        } else {
+                            items(state.artifacts, key = { it.optString("id") }) { artifact ->
+                                RightSidebarFile(artifact, false)
+                            }
+                        }
+                    }
+                    "subagents" -> item {
+                        RightSidebarSubagents(subagents ?: JSONObject())
+                    }
+                    "changes" -> item {
+                        RightSidebarChanges(
+                            changes = changes ?: JSONObject(),
+                            state = state,
+                            model = model,
+                        )
+                    }
+                    "branches" -> items(
+                        chatBranches,
+                        key = { it.chat.optString("id") },
+                    ) { branch ->
+                        RightSidebarBranch(
+                            branch = branch,
+                            onClick = {
+                                if (branch.relation != ChatBranchRelation.Current) {
+                                    model.openChat(branch.chat)
+                                    onClose()
+                                }
+                            },
+                        )
+                    }
+                    "viewer" -> item {
+                        RightSidebarViewer(state = state, onClose = model::clearViewer)
+                    }
+                    "map" -> item {
+                        RightSidebarMap(mapData ?: JSONObject())
+                    }
+                    else -> item {
+                        if (screen == 2) {
+                            RightSidebarChatOverview(state)
+                        } else {
+                            RightSidebarTaskOverview(state)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private enum class ChatBranchRelation {
+    Current,
+    Parent,
+    Child,
+    Sibling,
+}
+
+private data class ChatBranch(
+    val chat: JSONObject,
+    val relation: ChatBranchRelation,
+)
+
+private fun relatedChatBranches(
+    selectedChat: JSONObject?,
+    chats: List<JSONObject>,
+): List<ChatBranch> {
+    val current = selectedChat ?: return emptyList()
+    val currentId = current.optString("id")
+    if (currentId.isBlank()) return emptyList()
+    val currentOrigin = current.optString("forked_from_chat_id")
+        .ifBlank { current.optString("parent_chat_id") }
+    val result = linkedMapOf(currentId to ChatBranch(current, ChatBranchRelation.Current))
+    chats.forEach { candidate ->
+        val candidateId = candidate.optString("id")
+        if (candidateId.isBlank() || candidateId == currentId) return@forEach
+        val candidateOrigin = candidate.optString("forked_from_chat_id")
+            .ifBlank { candidate.optString("parent_chat_id") }
+        val relation = when {
+            currentOrigin.isNotBlank() && candidateId == currentOrigin ->
+                ChatBranchRelation.Parent
+            candidateOrigin == currentId ->
+                ChatBranchRelation.Child
+            currentOrigin.isNotBlank() && candidateOrigin == currentOrigin ->
+                ChatBranchRelation.Sibling
+            else -> null
+        }
+        if (relation != null) result[candidateId] = ChatBranch(candidate, relation)
+    }
+    return result.values.toList()
+}
+
+@Composable
+private fun RightSidebarBranch(
+    branch: ChatBranch,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = rightSidebarCardColor(),
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = .42f),
+        ),
+        shape = RoundedCornerShape(13.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Outlined.ChatBubbleOutline,
+                contentDescription = null,
+                tint = if (branch.relation == ChatBranchRelation.Current) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    branch.chat.optString("title")
+                        .ifBlank { stringResource(R.string.chat_unnamed) },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    stringResource(
+                        when (branch.relation) {
+                            ChatBranchRelation.Current -> R.string.right_sidebar_current_chat
+                            ChatBranchRelation.Parent -> R.string.right_sidebar_parent_chat
+                            ChatBranchRelation.Child -> R.string.right_sidebar_child_chat
+                            ChatBranchRelation.Sibling -> R.string.right_sidebar_sibling_chat
+                        },
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarChatOverview(state: MobileUiState) {
+    val chat = state.selectedChat ?: return
+    val context = chat.optJSONObject("context_metrics") ?: JSONObject()
+    val usage = context.optJSONObject("usage")
+        ?: chat.optJSONObject("usage")
+        ?: JSONObject()
+    val promptTokens = usage.optLong("prompt_tokens")
+    val completionTokens = usage.optLong("completion_tokens")
+    val totalTokens = usage.optLong("total_tokens").takeIf { it > 0 }
+        ?: (promptTokens + completionTokens)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        RightSidebarSection(stringResource(R.string.right_sidebar_run_summary)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(86.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = { 1f },
+                        modifier = Modifier.fillMaxSize(),
+                        color = Color(0xFF20A464),
+                        trackColor = Color(0xFF344153),
+                        strokeWidth = 7.dp,
+                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            compactTokenCount(totalTokens),
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            stringResource(R.string.right_sidebar_total_tokens),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    SidebarUsageRow(
+                        stringResource(R.string.right_sidebar_input_tokens),
+                        promptTokens,
+                        Color(0xFF3B82F6),
+                    )
+                    SidebarUsageRow(
+                        stringResource(R.string.right_sidebar_output_tokens),
+                        completionTokens,
+                        Color(0xFF9A88C7),
+                    )
+                    HorizontalDivider()
+                    SidebarUsageRow(
+                        stringResource(R.string.right_sidebar_total_tokens),
+                        totalTokens,
+                        Color(0xFF20A464),
+                    )
+                }
+            }
+        }
+        RightSidebarSection(stringResource(R.string.right_sidebar_session_info)) {
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_status),
+                localizedStatus(chat.optString("status")),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_messages),
+                chat.optInt(
+                    "message_count",
+                    chat.optJSONArray("messages")?.length() ?: 0,
+                ).toString(),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_model),
+                chat.optString("model").ifBlank { "—" },
+                monospace = true,
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_session_id),
+                chat.optString("id"),
+                monospace = true,
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_created),
+                formatSidebarDate(chat.optString("created_at")),
+            )
+        }
+        RightSidebarContextWindow(context)
+    }
+}
+
+@Composable
+private fun SidebarUsageRow(label: String, value: Long, color: Color) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(compactTokenCount(value), fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun RightSidebarContextWindow(context: JSONObject) {
+    if (context.length() == 0) return
+    val used = context.optLong("ctxUsed")
+    val limit = context.optLong("ctxLimit")
+    val ratio = context.optDouble("ratio", if (limit > 0) used.toDouble() / limit else 0.0)
+        .toFloat().coerceIn(0f, 1f)
+    val triggerRatio = context.optDouble("compactTriggerRatio", .6).toFloat()
+    val segments = context.optJSONArray("segments") ?: JSONArray()
+    RightSidebarSection(stringResource(R.string.right_sidebar_context_occupancy)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Column {
+                Text(
+                    if (ratio > 0f && ratio < .01f) {
+                        "<1%"
+                    } else {
+                        "${(ratio * 100).roundToInt()}%"
+                    },
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    stringResource(R.string.right_sidebar_context_used),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                "${compactTokenCount(used)} / ${compactTokenCount(limit)}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Box(
+            Modifier.fillMaxWidth().height(12.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(
+                Modifier.fillMaxWidth().height(8.dp).clip(CircleShape)
+                    .background(Color(0xFF1D2A3C)),
+            )
+            if (ratio > 0f) {
+                Box(
+                    Modifier.fillMaxWidth(ratio.coerceAtLeast(.012f)).height(8.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF20A464)),
+                )
+            }
+            Row(Modifier.fillMaxWidth().height(12.dp)) {
+                Spacer(Modifier.weight(triggerRatio.coerceIn(.01f, .99f)))
+                Box(Modifier.width(2.dp).fillMaxHeight().background(Color(0xFF7C8798)))
+                Spacer(Modifier.weight((1f - triggerRatio).coerceAtLeast(.01f)))
+            }
+        }
+        Text(
+            stringResource(
+                R.string.right_sidebar_compaction_triggers_at,
+                (triggerRatio * 100).roundToInt(),
+            ),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (ratio >= triggerRatio) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+        if (segments.length() > 0 && used > 0) {
+            Text(
+                stringResource(R.string.right_sidebar_context_breakdown),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            for (index in 0 until segments.length()) {
+                val segment = segments.optJSONObject(index) ?: continue
+                val tokens = segment.optLong("tokens")
+                if (tokens <= 0) continue
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(7.dp).clip(CircleShape)
+                            .background(contextMessageColor(segment.optString("key"))),
+                    )
+                    Text(
+                        localizedContextSegment(segment.optString("key")),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        String.format(Locale.US, "%.1f%%", tokens.toDouble() / used * 100),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarTaskOverview(state: MobileUiState) {
+    val task = state.selectedTask ?: return
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        RightSidebarSection(stringResource(R.string.right_sidebar_task_overview)) {
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_status),
+                localizedStatus(task.optString("status")),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_priority),
+                task.optString("priority", "medium"),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_created),
+                formatSidebarDate(task.optString("created_at")),
+            )
+            Text(
+                task.optString("goal"),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        RightSidebarSection(stringResource(R.string.right_sidebar_progress)) {
+            val steps = task.optJSONArray("plan")
+            val total = steps?.length() ?: 0
+            val done = (0 until total).count {
+                steps?.optJSONObject(it)?.optString("status") == "completed"
+            }
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_steps),
+                "$done / $total",
+            )
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { done.toFloat() / total },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarChatContext(state: MobileUiState) {
+    val chat = state.selectedChat ?: return
+    val blocks = chat.optJSONObject("context_blocks") ?: JSONObject()
+    val layers = blocks.optJSONArray("layers") ?: JSONArray()
+    val inbox = chat.optJSONObject("inbox") ?: JSONObject()
+    val packages = chat.optJSONArray("used_tool_packages") ?: JSONArray()
+    val barTotal = (0 until layers.length()).sumOf {
+        layers.optJSONObject(it)?.optLong("totalTokens") ?: 0L
+    }
+    val messageTokens = blocks.optLong("messageTokens").takeIf { it > 0 } ?: barTotal
+    val systemColors = listOf(
+        Color(0xFFC9D2DF),
+        Color(0xFFA9C7FF),
+        Color(0xFFC8C1E8),
+        Color(0xFF9ED9B8),
+        Color(0xFFE1B36A),
+        Color(0xFFC59573),
+        Color(0xFF86BCD2),
+        Color(0xFFB58AD7),
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        RightSidebarSection(stringResource(R.string.right_sidebar_conversation_context)) {
+            if (layers.length() == 0) {
+                Text(
+                    stringResource(R.string.right_sidebar_context_empty),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    Text(
+                        compactTokenCount(messageTokens),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        stringResource(R.string.right_sidebar_tokens),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (barTotal > 0) {
+                    Row(
+                        Modifier.fillMaxWidth().height(11.dp).clip(CircleShape),
+                    ) {
+                        for (layerIndex in 0 until layers.length()) {
+                            val layer = layers.optJSONObject(layerIndex) ?: continue
+                            val layerId = layer.optString("id")
+                            val layerBlocks = layer.optJSONArray("blocks") ?: JSONArray()
+                            if (
+                                (layerId == "system_prefix" || layerId == "messages") &&
+                                layerBlocks.length() > 0
+                            ) {
+                                for (blockIndex in 0 until layerBlocks.length()) {
+                                    val block = layerBlocks.optJSONObject(blockIndex) ?: continue
+                                    val tokens = block.optLong("tokens_est")
+                                    if (tokens <= 0) continue
+                                    val color = if (layerId == "messages") {
+                                        contextMessageColor(block.optString("type"))
+                                    } else {
+                                        systemColors[systemContextShade(block)]
+                                    }
+                                    Box(
+                                        Modifier.weight(tokens.toFloat()).fillMaxHeight()
+                                            .background(color),
+                                    )
+                                }
+                            } else {
+                                val tokens = layer.optLong("totalTokens")
+                                if (tokens > 0) {
+                                    Box(
+                                        Modifier.weight(tokens.toFloat()).fillMaxHeight()
+                                            .background(Color(0xFFE9777C)),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                for (layerIndex in 0 until layers.length()) {
+                    val layer = layers.optJSONObject(layerIndex) ?: continue
+                    if (layer.optLong("totalTokens") <= 0) continue
+                    val layerId = layer.optString("id")
+                    Text(
+                        localizedContextLayer(layerId, layer.optString("label")),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    val layerBlocks = layer.optJSONArray("blocks") ?: JSONArray()
+                    if (layerBlocks.length() == 0) {
+                        ContextLegendRow(
+                            color = Color(0xFFE9777C),
+                            label = localizedContextLayer(layerId, layer.optString("label")),
+                            tokens = layer.optLong("totalTokens"),
+                        )
+                    } else {
+                        for (blockIndex in 0 until layerBlocks.length()) {
+                            val block = layerBlocks.optJSONObject(blockIndex) ?: continue
+                            val tokens = block.optLong("tokens_est")
+                            if (tokens <= 0) continue
+                            ContextLegendRow(
+                                color = when (layerId) {
+                                    "system_prefix" ->
+                                        systemColors[systemContextShade(block)]
+                                    "messages" ->
+                                        contextMessageColor(block.optString("type"))
+                                    else -> Color(0xFFE9777C)
+                                },
+                                label = if (layerId == "messages") {
+                                    localizedContextSegment(block.optString("type"))
+                                } else {
+                                    localizedContextBlock(block.optString("id"))
+                                },
+                                tokens = tokens,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        RightSidebarSection(
+            buildString {
+                append(stringResource(R.string.right_sidebar_agent_inbox))
+                val counts = inbox.optJSONObject("counts") ?: JSONObject()
+                if (counts.optInt("total") == 0) {
+                    append("  ·  ")
+                    append(stringResource(R.string.right_sidebar_queue_empty))
+                }
+            },
+        ) {
+            val events = inbox.optJSONArray("events") ?: JSONArray()
+            val tools = inbox.optJSONArray("tools") ?: JSONArray()
+            if (events.length() == 0 && tools.length() == 0) {
+                Text(
+                    stringResource(R.string.right_sidebar_inbox_desktop_empty),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                for (index in 0 until events.length()) {
+                    val event = events.optJSONObject(index) ?: continue
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            event.optString("kind")
+                                .ifBlank { event.optString("type", "Inbox") },
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        event.optString("preview").takeIf(String::isNotBlank)?.let {
+                            Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                for (index in 0 until tools.length()) {
+                    val tool = tools.optJSONObject(index) ?: continue
+                    SidebarMetricRow(
+                        tool.optString("name", stringResource(R.string.right_sidebar_tool)),
+                        localizedStatus(tool.optString("state")),
+                        monospace = true,
+                    )
+                }
+            }
+        }
+        RightSidebarSection(stringResource(R.string.right_sidebar_used_tool_packages)) {
+            if (packages.length() == 0) {
+                Text(
+                    stringResource(R.string.right_sidebar_no_tool_packages_desktop),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            for (index in 0 until packages.length()) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF20A464)),
+                    )
+                    Text(
+                        localizedToolPackage(packages.optString(index)),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+        RightSidebarSection(stringResource(R.string.right_sidebar_chat_stats)) {
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_message_count),
+                chat.optInt(
+                    "message_count",
+                    chat.optJSONArray("messages")?.length() ?: 0,
+                ).toString(),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_last_updated),
+                formatSidebarDate(chat.optString("updated_at")),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ContextLegendRow(color: Color, label: String, tokens: Long) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(9.dp).clip(RoundedCornerShape(2.dp)).background(color))
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            compactTokenCount(tokens),
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun RightSidebarTaskContext(state: MobileUiState) {
+    val task = state.selectedTask ?: return
+    val project = state.selectedProject
+    RightSidebarSection(stringResource(R.string.right_sidebar_task_context)) {
+        SidebarMetricRow(
+            stringResource(R.string.right_sidebar_project),
+            project?.optString("name").orEmpty().ifBlank { "—" },
+        )
+        SidebarMetricRow(
+            stringResource(R.string.right_sidebar_last_updated),
+            formatSidebarDate(task.optString("updated_at")),
+        )
+        SidebarMetricRow(
+            stringResource(R.string.right_sidebar_artifacts),
+            state.artifacts.size.toString(),
+        )
+        SelectionContainer {
+            Text(
+                task.optString("goal"),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarPlan(
+    plan: JSONArray?,
+    title: String,
+    summary: String,
+) {
+    RightSidebarSection(
+        title.ifBlank { stringResource(R.string.right_sidebar_plan) },
+    ) {
+        if (summary.isNotBlank()) {
+            Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (plan == null || plan.length() == 0) {
+            Text(
+                stringResource(R.string.right_sidebar_plan_empty),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            for (index in 0 until plan.length()) {
+                val step = plan.optJSONObject(index) ?: continue
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = if (step.optString("status") == "completed") {
+                            MaterialTheme.colorScheme.tertiaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.primaryContainer
+                        },
+                    ) {
+                        Text(
+                            (index + 1).toString(),
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            step.optString("title")
+                                .ifBlank { stringResource(R.string.right_sidebar_step, index + 1) },
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        step.optString("description").takeIf(String::isNotBlank)?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            localizedStatus(step.optString("status", "pending")),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarSubagents(data: JSONObject) {
+    val rounds = data.optJSONArray("rounds") ?: JSONArray()
+    val agents = data.optJSONArray("agents") ?: JSONArray()
+    val messages = data.optJSONArray("messages") ?: JSONArray()
+    val activeRoundId = data.optString("activeRoundId")
+    val activeRound = (0 until rounds.length())
+        .mapNotNull(rounds::optJSONObject)
+        .firstOrNull { it.optString("id") == activeRoundId }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        RightSidebarSection(stringResource(R.string.right_sidebar_subagent_activity)) {
+            Text(
+                activeRound?.optString("title")
+                    .orEmpty()
+                    .ifBlank { activeRoundId },
+                fontWeight = FontWeight.SemiBold,
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_agents),
+                agents.length().toString(),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_active),
+                (activeRound?.optInt("activeCount") ?: 0).toString(),
+            )
+        }
+        for (index in 0 until agents.length()) {
+            val agent = agents.optJSONObject(index) ?: continue
+            RightSidebarSection(
+                agent.optString("name").ifBlank {
+                    stringResource(R.string.right_sidebar_subagent)
+                },
+            ) {
+                Text(
+                    localizedStatus(agent.optString("status")),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                agent.optString("task").takeIf(String::isNotBlank)?.let { task ->
+                    Text(
+                        task,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                agent.optString("result").takeIf(String::isNotBlank)?.let { result ->
+                    HorizontalDivider()
+                    MarkdownMessage(result)
+                }
+            }
+        }
+        if (messages.length() > 0) {
+            RightSidebarSection(stringResource(R.string.right_sidebar_agent_messages)) {
+                for (index in 0 until messages.length()) {
+                    val message = messages.optJSONObject(index) ?: continue
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                buildString {
+                                    append(message.optString("from").ifBlank { "Agent" })
+                                    message.optString("to").takeIf(String::isNotBlank)?.let {
+                                        append(" → ")
+                                        append(it)
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                formatSidebarDate(message.optString("timestamp")),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        MarkdownMessage(message.optString("content"))
+                    }
+                    if (index < messages.length() - 1) HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarChanges(
+    changes: JSONObject,
+    state: MobileUiState,
+    model: MainViewModel,
+) {
+    val changeSets = changes.optJSONArray("changeSets") ?: JSONArray()
+    val changeSet = changeSets.optJSONObject(0)
+    val files = changeSet?.optJSONArray("files") ?: JSONArray()
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        RightSidebarSection(stringResource(R.string.right_sidebar_change_summary)) {
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_changed_files),
+                changes.optInt("fileCount").toString(),
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Text(
+                    "+${changes.optInt("additions")}",
+                    color = Color(0xFF2E9B62),
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "−${changes.optInt("deletions")}",
+                    color = MaterialTheme.colorScheme.error,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            changeSet?.optString("completedAt")?.takeIf(String::isNotBlank)?.let {
+                Text(
+                    formatSidebarDate(it),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        for (index in 0 until files.length()) {
+            val file = files.optJSONObject(index) ?: continue
+            Card(
+                modifier = Modifier.fillMaxWidth().clickable {
+                    if (changeSet != null) model.loadChangeDiff(changeSet, file)
+                },
+                colors = CardDefaults.cardColors(
+                    containerColor = rightSidebarCardColor(),
+                ),
+                border = BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = .42f),
+                ),
+                shape = RoundedCornerShape(13.dp),
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(
+                        file.optString("path"),
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            localizedChangeType(file.optString("changeType")),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            "+${file.optInt("additions")}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF2E9B62),
+                        )
+                        Text(
+                            "−${file.optInt("deletions")}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
+        }
+        if (state.changeDiffLoading) {
+            Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        }
+        state.selectedChangeDiff?.let { diff ->
+            RightSidebarSection(diff.optString("path")) {
+                if (diff.optBoolean("binary")) {
+                    Text(
+                        stringResource(R.string.right_sidebar_binary_diff),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    val text = diff.optString("diff")
+                    if (text.isBlank()) {
+                        Text(
+                            stringResource(R.string.right_sidebar_diff_unavailable),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        SelectionContainer {
+                            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                text.lineSequence().take(500).forEach { line ->
+                                    Text(
+                                        line,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = when {
+                                            line.startsWith("+") && !line.startsWith("+++") ->
+                                                Color(0xFF2E9B62)
+                                            line.startsWith("-") && !line.startsWith("---") ->
+                                                MaterialTheme.colorScheme.error
+                                            line.startsWith("@@") ->
+                                                MaterialTheme.colorScheme.primary
+                                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarViewer(
+    state: MobileUiState,
+    onClose: () -> Unit,
+) {
+    val file = state.viewerFile ?: return
+    val path = state.viewerFilePath
+    val mediaType = state.viewerMimeType.orEmpty().lowercase(Locale.ROOT)
+    val name = file.optString("name", "file")
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(name, fontWeight = FontWeight.SemiBold)
+                Text(
+                    mediaType.ifBlank { stringResource(R.string.right_sidebar_unknown_file_type) },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onClose) {
+                Icon(Icons.Outlined.Close, contentDescription = stringResource(R.string.action_close))
+            }
+        }
+        if (state.viewerLoading) {
+            Box(
+                Modifier.fillMaxWidth().height(180.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator()
+            }
+        } else if (path == null) {
+            Text(
+                stringResource(R.string.right_sidebar_preview_unavailable),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            val localFile = remember(path) { File(path) }
+            when {
+                mediaType.startsWith("image/") -> {
+                    val bitmap = remember(path) {
+                        BitmapFactory.decodeFile(path)?.asImageBitmap()
+                    }
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap,
+                            contentDescription = name,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 620.dp),
+                        )
+                    }
+                }
+                mediaType == "application/pdf" ||
+                    name.endsWith(".pdf", ignoreCase = true) -> {
+                    val bitmap = remember(path) { renderPdfFirstPage(localFile)?.asImageBitmap() }
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap,
+                            contentDescription = name,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 720.dp),
+                        )
+                        Text(
+                            stringResource(R.string.right_sidebar_pdf_first_page),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                mediaType == "text/html" ||
+                    name.endsWith(".html", true) ||
+                    name.endsWith(".htm", true) -> {
+                    val html = remember(path) {
+                        runCatching { localFile.readText().take(1_000_000) }.getOrDefault("")
+                    }
+                    AndroidView(
+                        factory = { context ->
+                            WebView(context).apply {
+                                webViewClient = WebViewClient()
+                                settings.javaScriptEnabled = true
+                                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                loadDataWithBaseURL(
+                                    localFile.parentFile?.toURI()?.toString(),
+                                    html,
+                                    "text/html",
+                                    "UTF-8",
+                                    null,
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(600.dp),
+                    )
+                }
+                isMarkdownFile(name, mediaType) -> {
+                    val content = remember(path) {
+                        runCatching { localFile.readText().take(500_000) }.getOrDefault("")
+                    }
+                    MarkdownMessage(content)
+                }
+                mediaType.startsWith("text/") || isTextFile(name) -> {
+                    val content = remember(path) {
+                        runCatching { localFile.readText().take(500_000) }.getOrDefault("")
+                    }
+                    SelectionContainer {
+                        Text(
+                            content,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                else -> {
+                    Text(
+                        stringResource(R.string.right_sidebar_preview_unsupported),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SidebarMetricRow(
+                        stringResource(R.string.right_sidebar_files),
+                        formatFileSize(localFile.length()),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarMap(data: JSONObject) {
+    val pins = data.optJSONArray("pins") ?: JSONArray()
+    val routes = data.optJSONArray("routes") ?: JSONArray()
+    val isDark = MaterialTheme.colorScheme.background.luminance() < .5f
+    val html = remember(data.toString(), isDark) {
+        mapViewerHtml(data, isDark)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AndroidView(
+            factory = { context ->
+                WebView(context).apply {
+                    webViewClient = WebViewClient()
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    loadDataWithBaseURL(
+                        "https://unpkg.com/leaflet@1.9.4/",
+                        html,
+                        "text/html",
+                        "UTF-8",
+                        null,
+                    )
+                }
+            },
+            update = {
+                it.loadDataWithBaseURL(
+                    "https://unpkg.com/leaflet@1.9.4/",
+                    html,
+                    "text/html",
+                    "UTF-8",
+                    null,
+                )
+            },
+            modifier = Modifier.fillMaxWidth().height(430.dp).clip(RoundedCornerShape(14.dp)),
+        )
+        RightSidebarSection(stringResource(R.string.right_sidebar_map_summary)) {
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_locations),
+                pins.length().toString(),
+            )
+            SidebarMetricRow(
+                stringResource(R.string.right_sidebar_routes),
+                routes.length().toString(),
+            )
+            for (index in 0 until pins.length()) {
+                val pin = pins.optJSONObject(index) ?: continue
+                Text(
+                    "• " + pin.optString("label").ifBlank {
+                        pin.optString("name").ifBlank {
+                            "${pin.optDouble("lat")}, ${pin.optDouble("lng")}"
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarFile(
+    file: JSONObject,
+    userUpload: Boolean,
+    onClick: (() -> Unit)? = null,
+) {
+    val cardModifier = if (onClick != null) {
+        Modifier.fillMaxWidth().clickable(onClick = onClick)
+    } else {
+        Modifier.fillMaxWidth()
+    }
+    Card(
+        modifier = cardModifier,
+        colors = CardDefaults.cardColors(
+            containerColor = rightSidebarCardColor(),
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = .42f),
+        ),
+        shape = RoundedCornerShape(13.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Outlined.AttachFile,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    file.optString("name", "file"),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (userUpload) {
+                        stringResource(R.string.right_sidebar_user_upload)
+                    } else {
+                        stringResource(R.string.right_sidebar_agent_file)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            file.optLong("size").takeIf { it > 0 }?.let {
+                Text(
+                    formatFileSize(it),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RightSidebarSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = rightSidebarCardColor(),
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = .42f),
+        ),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(15.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            content()
+        }
+    }
+}
+
+@Composable
+private fun rightSidebarCardColor(): Color =
+    if (MaterialTheme.colorScheme.background.luminance() < .5f) {
+        Color(0xFF202D40)
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+
+@Composable
+private fun rightSidebarContentColor(): Color =
+    if (MaterialTheme.colorScheme.background.luminance() < .5f) {
+        Color(0xFFF0F3FA)
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+
+@Composable
+private fun SidebarMetricRow(label: String, value: String, monospace: Boolean = false) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(.44f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Box(Modifier.weight(.56f)) {
+            SelectionContainer {
+                Text(
+                    value.ifBlank { "—" },
+                    modifier = Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+                )
+            }
+        }
+    }
+}
+
+private fun countChatAttachments(chat: JSONObject): Int {
+    val messages = chat.optJSONArray("messages") ?: return 0
+    var count = 0
+    for (index in 0 until messages.length()) {
+        count += messages.optJSONObject(index)?.optJSONArray("attachments")?.length() ?: 0
+    }
+    return count
+}
+
+private fun compactTokenCount(value: Long): String = when {
+    value >= 1_000_000 -> String.format(Locale.US, "%.1fM", value / 1_000_000.0)
+    value >= 1_000 -> String.format(Locale.US, "%.1fk", value / 1_000.0)
+    else -> value.toString()
+}
+
+private fun systemContextShade(block: JSONObject): Int {
+    val type = block.optString("type")
+    if (type != "system") {
+        return when (type) {
+            "memory" -> 1
+            "skills" -> 2
+            "runtime" -> 3
+            "command_prompt" -> 4
+            "spawn_policy" -> 5
+            "short_term" -> 6
+            else -> 7
+        }
+    }
+    val id = block.optString("id")
+    return when {
+        id.startsWith("main.system.static_extra") -> 4
+        id.startsWith("main.system.language") -> 1
+        id.startsWith("memory.") -> 1
+        id.startsWith("skills.") -> 2
+        id.startsWith("runtime.workspace") -> 3
+        id.startsWith("runtime.permission") -> 6
+        id.startsWith("runtime.project") -> 1
+        id.startsWith("runtime.session") -> 2
+        id.startsWith("runtime.spawn") -> 5
+        id.startsWith("runtime.goal") -> 4
+        id.startsWith("command.") -> 5
+        id.startsWith("spawn_policy.") -> 7
+        id.startsWith("short_term.") -> 7
+        else -> 0
+    }
+}
+
+private fun contextMessageColor(type: String): Color = when (type) {
+    "user" -> Color(0xFF3977EF)
+    "assistant" -> Color(0xFF9A88C7)
+    "tool" -> Color(0xFF20A464)
+    "compacted" -> Color(0xFF88A9D8)
+    else -> Color(0xFF7C8798)
+}
+
+@Composable
+private fun localizedContextSegment(key: String): String = when (key.lowercase(Locale.ROOT)) {
+    "compacted" -> stringResource(R.string.right_sidebar_segment_compacted)
+    "system", "system_context", "instructions" ->
+        stringResource(R.string.right_sidebar_segment_system)
+    "user" -> stringResource(R.string.right_sidebar_segment_user)
+    "assistant" -> stringResource(R.string.right_sidebar_segment_assistant)
+    "tool", "tools" -> stringResource(R.string.right_sidebar_segment_tool)
+    "ephemeral" -> stringResource(R.string.right_sidebar_segment_ephemeral)
+    else -> key.replace("_", " ").ifBlank { "—" }
+}
+
+@Composable
+private fun localizedContextLayer(id: String, fallback: String): String = when (id) {
+    "system_prefix" -> stringResource(R.string.right_sidebar_layer_system_prefix)
+    "ephemeral" -> stringResource(R.string.right_sidebar_layer_ephemeral)
+    "messages" -> stringResource(R.string.right_sidebar_layer_messages)
+    else -> fallback.ifBlank { id }
+}
+
+@Composable
+private fun localizedContextBlock(id: String): String = when {
+    id == "main.system.base" -> stringResource(R.string.right_sidebar_ctx_base_instructions)
+    id == "main.system.effective" -> stringResource(R.string.right_sidebar_ctx_system_prompt)
+    id == "main.system.static_extra" -> stringResource(R.string.right_sidebar_ctx_task_framing)
+    id == "main.system.language" -> stringResource(R.string.right_sidebar_ctx_language)
+    id == "mode.plan.discovery" -> stringResource(R.string.right_sidebar_ctx_plan_discovery)
+    id == "memory.context" -> stringResource(R.string.right_sidebar_ctx_memory)
+    id == "skills.installed" -> stringResource(R.string.right_sidebar_ctx_installed_skills)
+    id == "skills.learned" -> stringResource(R.string.right_sidebar_ctx_learned_skills)
+    id == "runtime.workspace_scope" -> stringResource(R.string.right_sidebar_ctx_workspace_scope)
+    id == "runtime.permission" -> stringResource(R.string.right_sidebar_ctx_permission)
+    id == "runtime.project_context" -> stringResource(R.string.right_sidebar_ctx_project_memory)
+    id == "runtime.session_scope" -> stringResource(R.string.right_sidebar_ctx_session_labels)
+    id == "runtime.spawn_policy" -> stringResource(R.string.right_sidebar_ctx_subagent_policy)
+    id == "runtime.goal" -> stringResource(R.string.right_sidebar_ctx_goal_hint)
+    id == "ephemeral.run" -> stringResource(R.string.right_sidebar_ctx_runtime_injection)
+    id == "short_term.restored" -> stringResource(R.string.right_sidebar_ctx_short_term_memory)
+    id == "spawn_policy.conservative" -> stringResource(R.string.right_sidebar_ctx_conservative)
+    id == "spawn_policy.default" -> stringResource(R.string.right_sidebar_ctx_default_policy)
+    id == "spawn_policy.off" -> stringResource(R.string.right_sidebar_ctx_subagents_off)
+    id.startsWith("history.compacted.") ->
+        stringResource(R.string.right_sidebar_segment_compacted)
+    id.startsWith("history.tool_result.") ->
+        stringResource(R.string.right_sidebar_ctx_tool_result)
+    id.startsWith("session.history.") ->
+        stringResource(R.string.right_sidebar_ctx_history_message)
+    id.startsWith("user.current.") ->
+        stringResource(R.string.right_sidebar_ctx_user_message)
+    else -> id
+        .removePrefix("main.")
+        .removePrefix("runtime.")
+        .removePrefix("command.")
+        .removePrefix("spawn_policy.")
+        .replace("_", " ")
+        .ifBlank { "—" }
+}
+
+@Composable
+private fun localizedToolPackage(wireName: String): String = when (wireName) {
+    "code_tools" -> stringResource(R.string.right_sidebar_tools_code)
+    "browser_tools" -> stringResource(R.string.right_sidebar_tools_browser)
+    "desktop_tools" -> stringResource(R.string.right_sidebar_tools_desktop)
+    "memory_tools" -> stringResource(R.string.right_sidebar_tools_memory)
+    "knowledge_tools" -> stringResource(R.string.right_sidebar_tools_knowledge)
+    "task_tools" -> stringResource(R.string.right_sidebar_tools_task)
+    "entity_tools" -> stringResource(R.string.right_sidebar_tools_entity)
+    "map_tools" -> stringResource(R.string.right_sidebar_tools_map)
+    "subagent_tools" -> stringResource(R.string.right_sidebar_tools_subagent)
+    "delivery_tools" -> stringResource(R.string.right_sidebar_tools_delivery)
+    "skill_tools" -> stringResource(R.string.right_sidebar_tools_skill)
+    "remote_tools" -> stringResource(R.string.right_sidebar_tools_remote)
+    "integration_tools" -> stringResource(R.string.right_sidebar_tools_integrations)
+    else -> wireName.removeSuffix("_tools").replace("_", " ")
+}
+
+@Composable
+private fun localizedChangeType(type: String): String = when (type) {
+    "created" -> stringResource(R.string.right_sidebar_change_created)
+    "deleted" -> stringResource(R.string.right_sidebar_change_deleted)
+    "modified" -> stringResource(R.string.right_sidebar_change_modified)
+    else -> type.ifBlank { "—" }
+}
+
+private fun isMarkdownFile(name: String, mediaType: String): Boolean =
+    mediaType == "text/markdown" ||
+        name.endsWith(".md", true) ||
+        name.endsWith(".markdown", true)
+
+private fun isTextFile(name: String): Boolean {
+    val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+    return extension in setOf(
+        "txt", "log", "json", "jsonl", "xml", "yaml", "yml", "toml", "ini",
+        "kt", "kts", "java", "py", "js", "jsx", "ts", "tsx", "css", "scss",
+        "sh", "zsh", "bash", "sql", "csv", "tsv", "rs", "go", "swift", "c",
+        "h", "cpp", "hpp",
+    )
+}
+
+private fun renderPdfFirstPage(file: File): Bitmap? = runCatching {
+    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+        PdfRenderer(descriptor).use { renderer ->
+            if (renderer.pageCount == 0) return@use null
+            renderer.openPage(0).use { page ->
+                val maxWidth = 1800
+                val scale = (maxWidth.toFloat() / page.width).coerceAtMost(2f)
+                val bitmap = Bitmap.createBitmap(
+                    (page.width * scale).roundToInt().coerceAtLeast(1),
+                    (page.height * scale).roundToInt().coerceAtLeast(1),
+                    Bitmap.Config.ARGB_8888,
+                )
+                bitmap.eraseColor(android.graphics.Color.WHITE)
+                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                bitmap
+            }
+        }
+    }
+}.getOrNull()
+
+private fun mapViewerHtml(data: JSONObject, dark: Boolean): String {
+    val json = data.toString().replace("</", "<\\/")
+    val tileStyle = if (dark) "dark_all" else "light_all"
+    val background = if (dark) "#101116" else "#f6f7fb"
+    val foreground = if (dark) "#ece8f1" else "#1f1d25"
+    return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+          <style>
+            html,body,#map{height:100%;margin:0;background:$background;color:$foreground}
+            .leaflet-container{font:14px system-ui;background:$background}
+          </style>
+        </head>
+        <body>
+          <div id="map"></div>
+          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+          <script>
+            const data=$json;
+            const map=L.map('map',{zoomControl:true,attributionControl:false}).setView([35,105],4);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/$tileStyle/{z}/{x}/{y}{r}.png',{subdomains:'abcd'}).addTo(map);
+            const byName={}; const bounds=[];
+            const safe=(value)=>String(value||'').replace(/[&<>"']/g,(char)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+            (data.pins||[]).forEach((pin)=>{
+              const lat=Number(pin.lat), lng=Number(pin.lng);
+              if(!Number.isFinite(lat)||!Number.isFinite(lng)) return;
+              const point=[lat,lng]; bounds.push(point); byName[String(pin.name||'')]=point;
+              const marker=L.circleMarker(point,{radius:8,color:'#7c5cff',weight:3,fillColor:'#a992ff',fillOpacity:.95}).addTo(map);
+              marker.bindPopup('<b>'+safe(pin.name)+'</b>'+(pin.note?'<br>'+safe(pin.note):''));
+            });
+            (data.routes||[]).forEach((route)=>{
+              const from=byName[String(route.from_name||route.from||'')];
+              const to=byName[String(route.to_name||route.to||'')];
+              if(!from||!to) return;
+              const line=L.polyline([from,to],{color:'#2e9b62',weight:4,opacity:.85,dashArray:'7 7'}).addTo(map);
+              const label=[route.transport,route.route_note].filter(Boolean).join(' · ');
+              if(label) line.bindPopup(safe(label));
+            });
+            if(bounds.length) map.fitBounds(bounds,{padding:[28,28],maxZoom:12});
+          </script>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
+private fun formatSidebarDate(raw: String): String {
+    if (raw.isBlank()) return "—"
+    val instant = runCatching { Instant.parse(raw) }.getOrNull()
+        ?: runCatching { OffsetDateTime.parse(raw).toInstant() }.getOrNull()
+        ?: return raw
+    return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        .withLocale(Locale.getDefault())
+        .withZone(ZoneId.systemDefault())
+        .format(instant)
+}
+
+private fun formatFileSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024f * 1024f))
+    bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024f)
+    else -> "$bytes B"
+}
+
+@Composable
+private fun PairingScreen(
+    state: MobileUiState,
+    model: MainViewModel,
+    onClose: (() -> Unit)? = null,
+) {
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("37841") }
     var key by remember { mutableStateOf("") }
@@ -502,6 +2644,14 @@ private fun PairingScreen(state: MobileUiState, model: MainViewModel) {
             Modifier.padding(horizontal = 24.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.Center,
         ) {
+            if (onClose != null) {
+                OutlinedButton(
+                    onClick = onClose,
+                    modifier = Modifier.padding(bottom = 20.dp),
+                ) {
+                    Text(stringResource(R.string.action_back))
+                }
+            }
             Text(stringResource(R.string.pair_brand), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             Text(stringResource(R.string.pair_title), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
@@ -576,45 +2726,71 @@ private fun PairingScreen(state: MobileUiState, model: MainViewModel) {
 }
 
 @Composable
-private fun DeviceScreen(state: MobileUiState, model: MainViewModel) {
-    val peer = state.peer ?: return
-    var showDetails by remember(peer.deviceId) { mutableStateOf(false) }
-    if (showDetails) {
-        DeviceDetailScreen(state, model, onBack = { showDetails = false })
+private fun DeviceScreen(
+    state: MobileUiState,
+    model: MainViewModel,
+    onAddDevice: () -> Unit,
+) {
+    val activePeer = state.peer ?: return
+    var detailDeviceId by remember { mutableStateOf<String?>(null) }
+    if (detailDeviceId == activePeer.deviceId) {
+        BackHandler { detailDeviceId = null }
+        DeviceDetailScreen(state, model)
         return
     }
-    LazyColumn(
-        contentPadding = PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            Text(
-                stringResource(R.string.devices_title),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                stringResource(R.string.devices_description),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            contentPadding = PaddingValues(start = 18.dp, top = 18.dp, end = 18.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item {
+                Text(
+                    stringResource(R.string.devices_title),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    stringResource(R.string.devices_description),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            items(state.peers, key = { it.deviceId }) { peer ->
+                val isActive = peer.deviceId == activePeer.deviceId
+                DataCard(
+                    title = peer.name,
+                    subtitle = if (!isActive) {
+                        stringResource(R.string.device_trusted_inactive)
+                    } else if (state.backgroundSyncing) {
+                        stringResource(
+                            R.string.device_sync_progress,
+                            (state.backgroundSyncProgress * 100).toInt(),
+                        )
+                    } else if (state.busy) {
+                        stringResource(R.string.device_syncing)
+                    } else {
+                        stringResource(R.string.device_online_projects, state.projects.size)
+                    },
+                    trailing = stringResource(R.string.action_details),
+                    progress = state.backgroundSyncProgress.takeIf {
+                        isActive && state.backgroundSyncing
+                    },
+                    showIndeterminateProgress =
+                        isActive && state.busy && !state.backgroundSyncing,
+                ) {
+                    if (!isActive) model.selectDevice(peer)
+                    detailDeviceId = peer.deviceId
+                }
+            }
         }
-        item {
-            DataCard(
-                title = peer.name,
-                subtitle = if (state.backgroundSyncing) {
-                    stringResource(
-                        R.string.device_sync_progress,
-                        (state.backgroundSyncProgress * 100).toInt(),
-                    )
-                } else if (state.busy) {
-                    stringResource(R.string.device_syncing)
-                } else {
-                    stringResource(R.string.device_online_projects, state.projects.size)
-                },
-                trailing = stringResource(R.string.action_details),
-                progress = state.backgroundSyncProgress.takeIf { state.backgroundSyncing },
-                showIndeterminateProgress = state.busy && !state.backgroundSyncing,
-            ) { showDetails = true }
+        FloatingActionButton(
+            onClick = onAddDevice,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp),
+            shape = CircleShape,
+        ) {
+            Icon(
+                Icons.Outlined.Add,
+                contentDescription = stringResource(R.string.device_add),
+            )
         }
     }
 }
@@ -623,27 +2799,43 @@ private fun DeviceScreen(state: MobileUiState, model: MainViewModel) {
 private fun DeviceDetailScreen(
     state: MobileUiState,
     model: MainViewModel,
-    onBack: () -> Unit,
 ) {
     val peer = state.peer ?: return
     var showAdvanced by remember(peer.deviceId) { mutableStateOf(false) }
     var confirmForget by remember { mutableStateOf(false) }
-    val chatCount = peer.capabilities.count {
+    var permissionDetails by remember(peer.deviceId) {
+        mutableStateOf<DevicePermissionDetails?>(null)
+    }
+    val projectPermissions = peer.projectScopes.map { scope ->
+        val projectName = state.projects
+            .firstOrNull { it.optString("id") == scope }
+            ?.optString("name")
+            .orEmpty()
+        if (projectName.isBlank()) scope else "$projectName\n$scope"
+    }
+    val context = LocalContext.current
+    val chatPermissions = peer.capabilities.filter {
         it.startsWith("chat:") || it.startsWith("approval:")
-    }
-    val taskCount = peer.capabilities.count {
+    }.map { localizedCapabilityLabel(context, it) }
+    val taskPermissions = peer.capabilities.filter {
         it.startsWith("task:") || it.startsWith("artifact:")
-    }
-    val toolCount = peer.capabilities.count { it.startsWith("toolpack:") }
+    }.map { localizedCapabilityLabel(context, it) }
+    val toolPermissions = peer.capabilities
+        .filter { it.startsWith("toolpack:") }
+        .map { localizedCapabilityLabel(context, it) }
+    val projectsTitle = stringResource(R.string.device_permissions_projects)
+    val projectsDescription = stringResource(R.string.device_permissions_projects_desc)
+    val chatTitle = stringResource(R.string.device_permissions_chat)
+    val chatDescription = stringResource(R.string.device_permissions_chat_desc)
+    val tasksTitle = stringResource(R.string.device_permissions_tasks)
+    val tasksDescription = stringResource(R.string.device_permissions_tasks_desc)
+    val toolsTitle = stringResource(R.string.device_permissions_tools)
+    val toolsDescription = stringResource(R.string.device_permissions_tools_desc)
     LazyColumn(
         contentPadding = PaddingValues(18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            OutlinedButton(onClick = onBack) {
-                Text(stringResource(R.string.action_back))
-            }
-            Spacer(Modifier.height(12.dp))
             Text(
                 stringResource(R.string.device_detail_title),
                 style = MaterialTheme.typography.headlineSmall,
@@ -709,25 +2901,49 @@ private fun DeviceDetailScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 PermissionRow(
-                    stringResource(R.string.device_permissions_projects),
-                    stringResource(R.string.device_permissions_projects_desc),
+                    projectsTitle,
+                    projectsDescription,
                     peer.projectScopes.size,
-                )
+                ) {
+                    permissionDetails = DevicePermissionDetails(
+                        title = projectsTitle,
+                        description = projectsDescription,
+                        items = projectPermissions,
+                    )
+                }
                 PermissionRow(
-                    stringResource(R.string.device_permissions_chat),
-                    stringResource(R.string.device_permissions_chat_desc),
-                    chatCount,
-                )
+                    chatTitle,
+                    chatDescription,
+                    chatPermissions.size,
+                ) {
+                    permissionDetails = DevicePermissionDetails(
+                        title = chatTitle,
+                        description = chatDescription,
+                        items = chatPermissions,
+                    )
+                }
                 PermissionRow(
-                    stringResource(R.string.device_permissions_tasks),
-                    stringResource(R.string.device_permissions_tasks_desc),
-                    taskCount,
-                )
+                    tasksTitle,
+                    tasksDescription,
+                    taskPermissions.size,
+                ) {
+                    permissionDetails = DevicePermissionDetails(
+                        title = tasksTitle,
+                        description = tasksDescription,
+                        items = taskPermissions,
+                    )
+                }
                 PermissionRow(
-                    stringResource(R.string.device_permissions_tools),
-                    stringResource(R.string.device_permissions_tools_desc),
-                    toolCount,
-                )
+                    toolsTitle,
+                    toolsDescription,
+                    toolPermissions.size,
+                ) {
+                    permissionDetails = DevicePermissionDetails(
+                        title = toolsTitle,
+                        description = toolsDescription,
+                        items = toolPermissions,
+                    )
+                }
             }
         }
         item {
@@ -781,6 +2997,93 @@ private fun DeviceDetailScreen(
             },
         )
     }
+    permissionDetails?.let { details ->
+        AlertDialog(
+            onDismissRequest = { permissionDetails = null },
+            title = { Text(details.title) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        details.description,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (details.items.isEmpty()) {
+                        Text(
+                            stringResource(R.string.device_permissions_details_empty),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 420.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(details.items) { item ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(
+                                        alpha = .55f,
+                                    ),
+                                    shape = RoundedCornerShape(12.dp),
+                                ) {
+                                    SelectionContainer {
+                                        Text(
+                                            item,
+                                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { permissionDetails = null }) {
+                    Text(stringResource(R.string.action_ok))
+                }
+            },
+        )
+    }
+}
+
+private data class DevicePermissionDetails(
+    val title: String,
+    val description: String,
+    val items: List<String>,
+)
+
+private fun localizedCapabilityLabel(context: Context, capability: String): String {
+    val stringId = when (capability) {
+        "projects:list_shared" -> R.string.device_capability_projects_list_shared
+        "approval:clarification" -> R.string.device_capability_approval_clarification
+        "approval:respond" -> R.string.device_capability_approval_respond
+        "chat:create" -> R.string.device_capability_chat_create
+        "chat:guide" -> R.string.device_capability_chat_guide
+        "chat:interrupt" -> R.string.device_capability_chat_interrupt
+        "chat:read" -> R.string.device_capability_chat_read
+        "chat:send" -> R.string.device_capability_chat_send
+        "task:create" -> R.string.device_capability_task_create
+        "task:control" -> R.string.device_capability_task_control
+        "task:dispatch" -> R.string.device_capability_task_dispatch
+        "task:read" -> R.string.device_capability_task_read
+        "artifact:read" -> R.string.device_capability_artifact_read
+        "settings:read" -> R.string.device_capability_settings_read
+        "settings:update" -> R.string.device_capability_settings_update
+        "toolpack:browser_tools" -> R.string.device_toolpack_browser
+        "toolpack:code_tools" -> R.string.device_toolpack_code
+        "toolpack:delivery_tools" -> R.string.device_toolpack_delivery
+        "toolpack:desktop_tools" -> R.string.device_toolpack_desktop
+        "toolpack:entity_tools" -> R.string.device_toolpack_entity
+        "toolpack:integration_tools" -> R.string.device_toolpack_integration
+        "toolpack:knowledge_tools" -> R.string.device_toolpack_knowledge
+        "toolpack:map_tools" -> R.string.device_toolpack_map
+        "toolpack:memory_tools" -> R.string.device_toolpack_memory
+        "toolpack:skill_tools" -> R.string.device_toolpack_skill
+        "toolpack:subagent_tools" -> R.string.device_toolpack_subagent
+        "toolpack:task_tools" -> R.string.device_toolpack_task
+        else -> return context.getString(R.string.device_capability_unknown, capability)
+    }
+    return context.getString(stringId)
 }
 
 @Composable
@@ -795,8 +3098,14 @@ private fun InfoRow(label: String, value: String) {
 }
 
 @Composable
-private fun PermissionRow(title: String, description: String, count: Int) {
+private fun PermissionRow(
+    title: String,
+    description: String,
+    count: Int,
+    onClick: () -> Unit,
+) {
     Surface(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
         shape = RoundedCornerShape(14.dp),
     ) {
@@ -823,6 +3132,12 @@ private fun PermissionRow(title: String, description: String, count: Int) {
                     fontWeight = FontWeight.Bold,
                 )
             }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "›",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -862,40 +3177,91 @@ private fun ProjectScreen(state: MobileUiState, model: MainViewModel, openChats:
 
 @Composable
 private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
+    var message by remember { mutableStateOf("") }
+    var plan by remember { mutableStateOf(false) }
+    val selectedChatId = state.selectedChat?.optString("id").orEmpty()
+    LaunchedEffect(selectedChatId) {
+        if (selectedChatId.isBlank()) {
+            message = ""
+            plan = false
+        } else if (state.creatingChat) {
+            message = ""
+            plan = false
+        }
+    }
     val project = state.selectedProject
     if (project == null) {
         CenterMessage(stringResource(R.string.project_select_first))
         return
     }
     if (state.selectedChat == null) {
-        LazyColumn(
-            contentPadding = PaddingValues(start = 18.dp, top = 18.dp, end = 18.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (state.chats.isEmpty()) item { EmptyCard(stringResource(R.string.chats_empty)) }
-            items(state.chats, key = { it.optString("id") }) { chat ->
-                DataCard(
-                    chat.optString("title", stringResource(R.string.chat_unnamed)),
-                    stringResource(
-                        R.string.chat_message_count,
-                        chat.optInt("message_count"),
-                        localizedStatus(chat.optString("status")),
-                    ),
-                    stringResource(R.string.action_open),
-                ) { model.openChat(chat) }
-            }
-        }
+        PendingChatDetail(
+            message = message,
+            onMessageChange = { message = it },
+            plan = plan,
+            onPlanChange = { plan = it },
+            busy = state.creatingChat,
+            onSend = {
+                model.sendNewChatMessage(message, plan)
+            },
+        )
     } else {
-        ChatDetail(state, model)
+        ChatDetail(
+            state = state,
+            model = model,
+            message = message,
+            onMessageChange = { message = it },
+            plan = plan,
+            onPlanChange = { plan = it },
+        )
     }
 }
 
 @Composable
-private fun ChatDetail(state: MobileUiState, model: MainViewModel) {
+private fun PendingChatDetail(
+    message: String,
+    onMessageChange: (String) -> Unit,
+    plan: Boolean,
+    onPlanChange: (Boolean) -> Unit,
+    busy: Boolean,
+    onSend: () -> Unit,
+) {
+    Box(Modifier.fillMaxSize()) {
+        NewChatWelcome(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(start = 28.dp, end = 28.dp, bottom = 124.dp),
+        )
+        ChatComposer(
+            message = message,
+            onMessageChange = onMessageChange,
+            plan = plan,
+            onPlanChange = onPlanChange,
+            running = false,
+            busy = busy,
+            attachments = emptyList(),
+            onAddAttachment = {},
+            onRemoveAttachment = {},
+            onSend = onSend,
+            onInterrupt = {},
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        )
+    }
+}
+
+@Composable
+private fun ChatDetail(
+    state: MobileUiState,
+    model: MainViewModel,
+    message: String,
+    onMessageChange: (String) -> Unit,
+    plan: Boolean,
+    onPlanChange: (Boolean) -> Unit,
+) {
     val chat = state.selectedChat ?: return
     val context = LocalContext.current
-    var message by remember { mutableStateOf("") }
-    var plan by remember { mutableStateOf(false) }
     var answer by remember { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
     val attachmentPicker = rememberLauncherForActivityResult(
@@ -924,9 +3290,19 @@ private fun ChatDetail(state: MobileUiState, model: MainViewModel) {
             val type = it.optString("type")
             type.startsWith("tool_call") || type == "tool_progress"
         }
+        val runError = state.runEvents.lastOrNull { it.optString("type") == "error" }
+        val retryContent = if (messages == null) "" else
+            (messages.length() - 1 downTo 0).firstNotNullOfOrNull { index ->
+                messages.optJSONObject(index)
+                    ?.takeIf { it.optString("role") == "user" }
+                    ?.optString("content")
+                    ?.let(::displayMessageContent)
+                    ?.takeIf(String::isNotBlank)
+            }.orEmpty()
         val transcriptCount = (messages?.length() ?: 0) +
             (if (liveTrace.isNotEmpty() || state.activeRunId != null) 1 else 0) +
-            (if (eventReply.isNotBlank()) 1 else 0)
+            (if (eventReply.isNotBlank()) 1 else 0) +
+            (if (runError != null) 1 else 0)
         LaunchedEffect(transcriptCount, eventReply.length) {
             if (transcriptCount > 0) listState.animateScrollToItem(transcriptCount - 1)
         }
@@ -947,7 +3323,11 @@ private fun ChatDetail(state: MobileUiState, model: MainViewModel) {
                         val item = messages.optJSONObject(index) ?: JSONObject()
                         ConversationMessage(
                             message = item,
-                            onEdit = { message = displayMessageContent(item.optString("content")) },
+                            state = state,
+                            model = model,
+                            onEdit = {
+                                onMessageChange(displayMessageContent(item.optString("content")))
+                            },
                             onRetry = {
                                 val content = displayMessageContent(item.optString("content"))
                                 if (content.isNotBlank() && !state.busy && state.activeRunId == null) {
@@ -974,6 +3354,24 @@ private fun ChatDetail(state: MobileUiState, model: MainViewModel) {
                         )
                     }
                 }
+                if (runError != null) {
+                    item {
+                        RunErrorMessage(
+                            message = runError.optString("message")
+                                .ifBlank { stringResource(R.string.chat_run_failed) },
+                            retryEnabled = retryContent.isNotBlank() &&
+                                !state.busy && state.activeRunId == null,
+                            onRetry = { model.sendMessage(retryContent, plan) },
+                        )
+                    }
+                }
+            }
+            if (transcriptCount == 0) {
+                NewChatWelcome(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(start = 28.dp, end = 28.dp, bottom = 124.dp),
+                )
             }
             Column(
                 Modifier
@@ -1010,11 +3408,11 @@ private fun ChatDetail(state: MobileUiState, model: MainViewModel) {
                 }
                 ChatComposer(
                     message = message,
-                    onMessageChange = { message = it },
+                    onMessageChange = onMessageChange,
                     plan = plan,
-                    onPlanChange = { plan = it },
+                    onPlanChange = onPlanChange,
                     running = state.activeRunId != null,
-                    busy = state.busy,
+                    busy = state.busy || state.creatingChat,
                     attachments = pendingAttachments,
                     onAddAttachment = { attachmentPicker.launch(arrayOf("*/*")) },
                     onRemoveAttachment = { attachment ->
@@ -1025,13 +3423,51 @@ private fun ChatDetail(state: MobileUiState, model: MainViewModel) {
                             model.sendMessage(message, plan, pendingAttachments)
                         }
                         else model.guideRun(message)
-                        message = ""
+                        onMessageChange("")
                         pendingAttachments = emptyList()
                     },
                     onInterrupt = model::interruptRun,
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun NewChatWelcome(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.widthIn(max = 520.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Surface(
+            modifier = Modifier.size(48.dp),
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .72f),
+            shape = RoundedCornerShape(15.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Outlined.ChatBubbleOutline,
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Text(
+            stringResource(R.string.chat_welcome_title),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            stringResource(R.string.chat_welcome_description),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp,
+        )
     }
 }
 
@@ -1521,12 +3957,38 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
 @Composable
 private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
     var input by remember { mutableStateOf("") }
+    var history by remember(state.selectedProject?.optString("id")) {
+        mutableStateOf<List<String>>(emptyList())
+    }
+    var historyIndex by remember(state.selectedProject?.optString("id")) {
+        mutableIntStateOf(0)
+    }
+    var historyDraft by remember(state.selectedProject?.optString("id")) {
+        mutableStateOf("")
+    }
     val listState = rememberLazyListState()
+    val horizontalScrollState = rememberScrollState()
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
     val terminalBackground = Color(0xFF10141D)
+    val terminalChrome = Color(0xFF171C27)
+    val terminalDivider = Color.White.copy(alpha = .12f)
     val terminalText = Color.White
     val terminalMuted = Color.White.copy(alpha = .72f)
+    val terminalAccent = Color(0xFF73E2A7)
+    val terminalDanger = Color(0xFFFF8A80)
+    val terminalReady = state.terminalSessionStatus == "running"
+    val projectName = state.selectedProject?.optString("name").orEmpty()
+    fun focusTerminalInput() {
+        if (!terminalReady) return
+        focusRequester.requestFocus()
+        scope.launch {
+            delay(50)
+            keyboardController?.show()
+        }
+    }
     LaunchedEffect(
         state.peer?.deviceId,
         state.selectedProject?.optString("id"),
@@ -1535,47 +3997,199 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
     }
     LaunchedEffect(state.terminalLines.size) {
         if (state.terminalLines.isNotEmpty()) {
-            listState.animateScrollToItem(state.terminalLines.lastIndex)
+            listState.scrollToItem(state.terminalLines.lastIndex)
         }
     }
     LaunchedEffect(state.terminalSessionStatus) {
-        if (state.terminalSessionStatus == "running") {
+        if (terminalReady) {
             delay(120)
-            focusRequester.requestFocus()
-            keyboardController?.show()
+            focusTerminalInput()
         }
     }
     fun submit() {
-        val command = input.trim()
+        val command = input.trimEnd()
         if (
             command.isNotBlank() &&
             !state.terminalBusy &&
-            state.terminalSessionStatus == "running"
+            terminalReady
         ) {
             model.sendTerminalCommand(command)
+            history = (history.filterNot { it == command } + command).takeLast(100)
+            historyIndex = history.size
+            historyDraft = ""
             input = ""
         }
     }
-    Surface(Modifier.fillMaxSize(), color = terminalBackground) {
+
+    fun previousCommand() {
+        if (history.isEmpty()) return
+        if (historyIndex >= history.size) historyDraft = input
+        historyIndex = (historyIndex - 1).coerceAtLeast(0)
+        input = history[historyIndex]
+        focusTerminalInput()
+    }
+
+    fun nextCommand() {
+        if (history.isEmpty()) return
+        if (historyIndex < history.lastIndex) {
+            historyIndex += 1
+            input = history[historyIndex]
+        } else {
+            historyIndex = history.size
+            input = historyDraft
+        }
+        focusTerminalInput()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(terminalBackground)
+            .clickable(
+                enabled = terminalReady,
+                onClick = ::focusTerminalInput,
+            ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(terminalChrome)
+                .padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(
+                        when (state.terminalSessionStatus) {
+                            "running" -> terminalAccent
+                            "connecting" -> Color(0xFFFFD166)
+                            else -> terminalDanger
+                        },
+                        CircleShape,
+                    )
+            )
+            Spacer(Modifier.width(9.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    projectName.ifBlank { stringResource(R.string.terminal_title) },
+                    color = terminalText,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    when (state.terminalSessionStatus) {
+                        "running" -> stringResource(
+                            R.string.terminal_session_path,
+                            state.terminalCwd,
+                        )
+                        "connecting" -> stringResource(R.string.terminal_connecting)
+                        else -> stringResource(R.string.terminal_disconnected)
+                    },
+                    color = terminalMuted,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (state.terminalBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    color = terminalAccent,
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            IconButton(
+                onClick = {
+                    clipboard.setText(AnnotatedString(state.terminalLines.joinToString("\n")))
+                },
+                enabled = state.terminalLines.isNotEmpty(),
+                modifier = Modifier.size(38.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.ContentCopy,
+                    contentDescription = stringResource(R.string.terminal_copy_output),
+                    tint = terminalMuted,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+            IconButton(
+                onClick = model::clearTerminalOutput,
+                enabled = state.terminalLines.isNotEmpty(),
+                modifier = Modifier.size(38.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.DeleteSweep,
+                    contentDescription = stringResource(R.string.terminal_clear_output),
+                    tint = terminalMuted,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            IconButton(
+                onClick = { model.ensureTerminalShell(force = true) },
+                enabled = state.selectedProject != null && !state.terminalBusy,
+                modifier = Modifier.size(38.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = stringResource(R.string.terminal_new_session),
+                    tint = terminalMuted,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+        }
+        HorizontalDivider(color = terminalDivider)
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
+            if (state.terminalLines.isEmpty() && terminalReady) {
+                item {
+                    Text(
+                        stringResource(R.string.terminal_ready_hint),
+                        color = terminalMuted.copy(alpha = .7f),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+            if (state.terminalSessionStatus == "connecting") {
+                item {
+                    Text(
+                        stringResource(R.string.terminal_connecting),
+                        color = terminalMuted,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
             items(state.terminalLines) { line ->
                 SelectionContainer {
                     Text(
                         line,
+                        modifier = Modifier.horizontalScroll(horizontalScrollState),
                         color = terminalText,
                         fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        softWrap = false,
                     )
                 }
             }
             if (
                 state.selectedProject == null ||
-                state.terminalSessionStatus == "error"
+                (
+                    !terminalReady &&
+                        state.terminalSessionStatus != "connecting"
+                    )
             ) {
                 item {
                     Row(
@@ -1603,40 +4217,167 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
                     }
                 }
             }
-            if (
-                state.selectedProject != null &&
-                state.terminalSessionStatus == "running"
+        }
+        if (terminalReady) {
+            HorizontalDivider(color = terminalDivider)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .background(terminalChrome)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        Text(
-                            "${state.terminalPrompt} ",
-                            color = terminalText,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        BasicTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            modifier = Modifier
-                                .weight(1f)
-                                .focusRequester(focusRequester),
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                color = terminalText,
-                                fontFamily = FontFamily.Monospace,
-                            ),
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Ascii,
-                                imeAction = ImeAction.Send,
-                                autoCorrectEnabled = false,
-                            ),
-                            keyboardActions = KeyboardActions(onSend = { submit() }),
-                        )
+                TerminalKeyButton("Ctrl-C", terminalDanger) {
+                    model.interruptTerminal()
+                    focusTerminalInput()
+                }
+                TerminalKeyButton("Ctrl-L", terminalMuted) {
+                    model.clearTerminalOutput()
+                    focusTerminalInput()
+                }
+                TerminalKeyButton("Tab", terminalMuted) {
+                    input += "\t"
+                    focusTerminalInput()
+                }
+                TerminalKeyButton(
+                    label = "↑",
+                    color = terminalMuted,
+                    contentDescription = stringResource(R.string.terminal_previous_command),
+                    onClick = ::previousCommand,
+                )
+                TerminalKeyButton(
+                    label = "↓",
+                    color = terminalMuted,
+                    contentDescription = stringResource(R.string.terminal_next_command),
+                    onClick = ::nextCommand,
+                )
+                TerminalKeyButton(
+                    label = stringResource(R.string.terminal_paste),
+                    color = terminalMuted,
+                ) {
+                    clipboard.getText()?.text?.let { input += it }
+                    focusTerminalInput()
+                }
+                TerminalKeyButton("Ctrl-D", terminalMuted) {
+                    if (!state.terminalBusy) {
+                        model.sendTerminalCommand("exit")
                     }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(terminalBackground)
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${state.terminalPrompt} ",
+                    color = terminalAccent,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                )
+                BasicTextField(
+                    value = input,
+                    onValueChange = {
+                        input = it
+                        if (historyIndex != history.size) historyIndex = history.size
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(focusRequester)
+                        .onPreviewKeyEvent { event ->
+                            val keyEvent = event.nativeKeyEvent
+                            if (keyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
+                                false
+                            } else {
+                                when {
+                                    keyEvent.isCtrlPressed &&
+                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_C -> {
+                                        model.interruptTerminal()
+                                        true
+                                    }
+                                    keyEvent.isCtrlPressed &&
+                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_L -> {
+                                        model.clearTerminalOutput()
+                                        true
+                                    }
+                                    keyEvent.isCtrlPressed &&
+                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_D -> {
+                                        if (!state.terminalBusy) {
+                                            model.sendTerminalCommand("exit")
+                                        }
+                                        true
+                                    }
+                                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_UP -> {
+                                        previousCommand()
+                                        true
+                                    }
+                                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
+                                        nextCommand()
+                                        true
+                                    }
+                                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_TAB -> {
+                                        input += "\t"
+                                        true
+                                    }
+                                    else -> false
+                                }
+                            }
+                        },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                        color = terminalText,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                    ),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Send,
+                        autoCorrectEnabled = false,
+                    ),
+                    keyboardActions = KeyboardActions(onSend = { submit() }),
+                    cursorBrush = SolidColor(terminalAccent),
+                    decorationBox = { innerTextField ->
+                        Box {
+                            if (input.isEmpty()) {
+                                Text(
+                                    stringResource(R.string.terminal_placeholder),
+                                    color = terminalMuted.copy(alpha = .45f),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 14.sp,
+                                )
+                            }
+                            innerTextField()
+                        }
+                    },
+                )
+                IconButton(
+                    onClick = ::previousCommand,
+                    enabled = history.isNotEmpty(),
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.KeyboardArrowUp,
+                        contentDescription = stringResource(R.string.terminal_previous_command),
+                        tint = terminalMuted,
+                    )
+                }
+                IconButton(
+                    onClick = { submit() },
+                    enabled = input.isNotBlank() && !state.terminalBusy,
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.Send,
+                        contentDescription = stringResource(R.string.action_send),
+                        tint = if (input.isNotBlank() && !state.terminalBusy) {
+                            terminalAccent
+                        } else {
+                            terminalMuted.copy(alpha = .35f)
+                        },
+                    )
                 }
             }
         }
@@ -1644,13 +4385,65 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
 }
 
 @Composable
-private fun SettingsScreen(state: MobileUiState, model: MainViewModel) {
+private fun TerminalKeyButton(
+    label: String,
+    color: Color,
+    contentDescription: String = label,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .height(34.dp)
+            .semantics { this.contentDescription = contentDescription }
+            .clickable(onClick = onClick),
+        color = Color.White.copy(alpha = .07f),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Box(
+            modifier = Modifier.padding(horizontal = 11.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = color,
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier,
+            )
+        }
+    }
+}
+
+@Composable
+private fun settingsPageTitle(pageId: String?, schema: JSONObject?): String {
+    if (pageId == null) return stringResource(R.string.nav_settings)
+    if (pageId == "mobile") return stringResource(R.string.settings_mobile_section)
+    if (pageId == "about") return stringResource(R.string.settings_about_title)
+    return jsonObjects(schema?.optJSONArray("sections"))
+        .firstOrNull { it.optString("id") == pageId }
+        ?.let { localizedSettingText(it, "label") }
+        ?.takeIf(String::isNotBlank)
+        ?: if (pageId == "models") {
+            stringResource(R.string.settings_models_title)
+        } else {
+            stringResource(R.string.nav_settings)
+        }
+}
+
+@Composable
+private fun SettingsScreen(
+    state: MobileUiState,
+    model: MainViewModel,
+    pageId: String?,
+    onOpenPage: (String) -> Unit,
+) {
     val context = LocalContext.current
     val desktop = state.desktopSettings
     val schema = state.desktopSettingsSchema
     var editingField by remember { mutableStateOf<JSONObject?>(null) }
     var editorValue by remember { mutableStateOf("") }
     var editorError by remember { mutableStateOf(false) }
+    val currentVersion = remember(context) { installedVersionName(context) }
     LaunchedEffect(state.peer?.deviceId) {
         model.loadDesktopSettings()
     }
@@ -1755,120 +4548,635 @@ private fun SettingsScreen(state: MobileUiState, model: MainViewModel) {
     val fields = jsonObjects(schema?.optJSONArray("fields")).filterNot {
         it.optString("section") == "tools" || it.optString("key").startsWith("tool::")
     }
-    LazyColumn(
-        contentPadding = PaddingValues(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        item {
-            Text(
-                stringResource(R.string.settings_title),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+    val visibleSections = sections.filter { section ->
+        val sectionId = section.optString("id")
+        sectionId !in setOf("execution", "discussion") && (
+            sectionId == "skills" ||
+            (sectionId == "models" && state.desktopModels != null) ||
+                fields.any { it.optString("section") == sectionId }
             )
-        }
-        item {
-            SectionCard(stringResource(R.string.settings_mobile_section)) {
-                Text(
-                    stringResource(R.string.settings_mobile_description),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    stringResource(R.string.settings_appearance),
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-                ChoiceRow(
-                    stringResource(R.string.settings_theme_system),
-                    state.uiTheme == "system",
-                ) { model.setUiTheme("system") }
-                ChoiceRow(
-                    stringResource(R.string.settings_theme_light),
-                    state.uiTheme == "light",
-                ) { model.setUiTheme("light") }
-                ChoiceRow(
-                    stringResource(R.string.settings_theme_dark),
-                    state.uiTheme == "dark",
-                ) { model.setUiTheme("dark") }
-                HorizontalDivider(Modifier.padding(vertical = 4.dp))
-                Text(
-                    stringResource(R.string.settings_language),
-                    fontWeight = FontWeight.SemiBold,
-                )
-                listOf(
-                    "" to stringResource(R.string.settings_language_system),
-                    "zh-CN" to stringResource(R.string.settings_language_chinese),
-                    "en" to stringResource(R.string.settings_language_english),
-                ).forEach { (code, label) ->
-                    ChoiceRow(label, state.uiLanguage == code) {
-                        model.setUiLanguage(code)
-                        (context as? Activity)?.let { applyAppLanguage(it, code) }
+    }
+
+    when (pageId) {
+        null -> {
+            LazyColumn(
+                contentPadding = PaddingValues(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item {
+                    SectionCard(stringResource(R.string.settings_mobile_section)) {
+                        SettingsMenuRow(
+                            title = stringResource(R.string.settings_mobile_menu_title),
+                            subtitle = stringResource(R.string.settings_mobile_menu_description),
+                            onClick = { onOpenPage("mobile") },
+                        )
+                        HorizontalDivider(Modifier.padding(vertical = 3.dp))
+                        SettingsMenuRow(
+                            title = stringResource(R.string.settings_update_title),
+                            subtitle = stringResource(
+                                R.string.settings_update_description,
+                                currentVersion,
+                            ),
+                            onClick = { onOpenPage("about") },
+                        )
                     }
                 }
-            }
-        }
-        item {
-            SectionCard(stringResource(R.string.settings_desktop_section)) {
-                Text(
-                    stringResource(R.string.settings_desktop_description),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (desktop == null) {
-                    Text(
-                        stringResource(R.string.settings_desktop_unavailable),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedButton(onClick = model::loadDesktopSettings) {
-                        Text(stringResource(R.string.action_refresh))
-                    }
-                } else {
-                    Text(
-                        stringResource(R.string.settings_desktop_count, fields.size),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                Text(
-                    stringResource(R.string.settings_security_note),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        state.desktopModels?.let { models ->
-            item {
-                ModelSettingsCard(models, state.busy, model)
-            }
-        }
-        if (desktop != null) {
-            items(sections, key = { it.optString("id") }) { section ->
-                val sectionFields = fields.filter {
-                    it.optString("section") == section.optString("id")
-                }
-                if (sectionFields.isNotEmpty()) {
-                    SectionCard(localizedSettingText(section, "label")) {
-                        sectionFields.forEachIndexed { index, field ->
-                            DesktopSettingFieldRow(
-                                field = field,
-                                value = desktop.opt(field.optString("key")),
-                                enabled = !state.busy,
-                                onBooleanChanged = {
-                                    model.updateDesktopSetting(field.optString("key"), it)
-                                },
-                                onEdit = {
-                                    editorValue = desktop.opt(field.optString("key"))
-                                        ?.toString().orEmpty()
-                                    editorError = false
-                                    editingField = field
-                                },
+                item {
+                    SectionCard(stringResource(R.string.settings_desktop_section)) {
+                        if (desktop == null) {
+                            Text(
+                                stringResource(R.string.settings_desktop_unavailable),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            if (index < sectionFields.lastIndex) {
-                                HorizontalDivider(Modifier.padding(vertical = 3.dp))
+                            OutlinedButton(onClick = model::loadDesktopSettings) {
+                                Text(stringResource(R.string.action_refresh))
+                            }
+                        } else {
+                            visibleSections.forEachIndexed { index, section ->
+                                val sectionId = section.optString("id")
+                                SettingsMenuRow(
+                                    title = localizedSettingText(section, "label"),
+                                    subtitle = settingsSectionDescription(sectionId),
+                                    onClick = { onOpenPage(sectionId) },
+                                )
+                                if (index < visibleSections.lastIndex) {
+                                    HorizontalDivider(Modifier.padding(vertical = 3.dp))
+                                }
+                            }
+                        }
+                        Text(
+                            stringResource(R.string.settings_security_note),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        "mobile" -> {
+            LazyColumn(
+                contentPadding = PaddingValues(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item {
+                    SectionCard(stringResource(R.string.settings_appearance)) {
+                        ChoiceRow(
+                            stringResource(R.string.settings_theme_system),
+                            state.uiTheme == "system",
+                        ) { model.setUiTheme("system") }
+                        ChoiceRow(
+                            stringResource(R.string.settings_theme_light),
+                            state.uiTheme == "light",
+                        ) { model.setUiTheme("light") }
+                        ChoiceRow(
+                            stringResource(R.string.settings_theme_dark),
+                            state.uiTheme == "dark",
+                        ) { model.setUiTheme("dark") }
+                    }
+                }
+                item {
+                    SectionCard(stringResource(R.string.settings_language)) {
+                        listOf(
+                            "" to stringResource(R.string.settings_language_system),
+                            "zh-CN" to stringResource(R.string.settings_language_chinese),
+                            "en" to stringResource(R.string.settings_language_english),
+                        ).forEach { (code, label) ->
+                            ChoiceRow(label, state.uiLanguage == code) {
+                                model.setUiLanguage(code)
+                                (context as? Activity)?.let { applyAppLanguage(it, code) }
                             }
                         }
                     }
                 }
             }
         }
+        "about" -> AboutUpdateScreen(currentVersion)
+        "models" -> {
+            LazyColumn(
+                contentPadding = PaddingValues(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                state.desktopModels?.let { models ->
+                    item {
+                        ModelSettingsCard(
+                            models = models,
+                            busy = state.busy,
+                            model = model,
+                            showTitle = false,
+                        )
+                    }
+                } ?: item {
+                    SectionCard(null) {
+                        Text(
+                            stringResource(R.string.settings_desktop_unavailable),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(onClick = model::loadDesktopSettings) {
+                            Text(stringResource(R.string.action_refresh))
+                        }
+                    }
+                }
+            }
+        }
+        else -> {
+            val sectionFields = fields.filter { it.optString("section") == pageId }
+            LazyColumn(
+                contentPadding = PaddingValues(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item {
+                    SectionCard(null) {
+                        if (desktop == null) {
+                            Text(
+                                stringResource(R.string.settings_desktop_unavailable),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(onClick = model::loadDesktopSettings) {
+                                Text(stringResource(R.string.action_refresh))
+                            }
+                        } else if (sectionFields.isEmpty() && pageId == "skills") {
+                            Text(
+                                stringResource(R.string.settings_no_installed_skills),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(onClick = model::loadDesktopSettings) {
+                                Text(stringResource(R.string.action_refresh))
+                            }
+                        } else if (sectionFields.isEmpty()) {
+                            Text(
+                                stringResource(R.string.settings_desktop_unavailable),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            sectionFields.forEachIndexed { index, field ->
+                                DesktopSettingFieldRow(
+                                    field = field,
+                                    value = desktop.opt(field.optString("key")),
+                                    enabled = !state.busy,
+                                    onBooleanChanged = {
+                                        model.updateDesktopSetting(field.optString("key"), it)
+                                    },
+                                    onEdit = {
+                                        editorValue = desktop.opt(field.optString("key"))
+                                            ?.toString().orEmpty()
+                                        editorError = false
+                                        editingField = field
+                                    },
+                                )
+                                if (index < sectionFields.lastIndex) {
+                                    HorizontalDivider(Modifier.padding(vertical = 3.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        stringResource(R.string.settings_security_note),
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutUpdateScreen(currentVersion: String) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<UpdateCheckResult?>(null) }
+    var checkFailed by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadedBytes by remember { mutableStateOf(0L) }
+    var totalBytes by remember { mutableStateOf(0L) }
+    var downloadedApk by remember { mutableStateOf<File?>(null) }
+    var pendingInstallApk by remember { mutableStateOf<File?>(null) }
+    var actionError by remember { mutableStateOf<Int?>(null) }
+
+    val installPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val apk = pendingInstallApk
+        if (apk != null && canInstallPackages(context)) {
+            runCatching { launchApkInstaller(context, apk) }
+                .onFailure { actionError = R.string.settings_update_install_failed }
+            pendingInstallApk = null
+        } else if (apk != null) {
+            actionError = R.string.settings_update_install_permission
+        }
+    }
+
+    val requestInstallation: (File) -> Unit = { apk ->
+        actionError = null
+        when {
+            !isCyreneApk(context, apk) -> {
+                actionError = R.string.settings_update_invalid_apk
+            }
+            canInstallPackages(context) -> {
+                runCatching { launchApkInstaller(context, apk) }
+                    .onFailure { actionError = R.string.settings_update_install_failed }
+            }
+            else -> {
+                pendingInstallApk = apk
+                actionError = R.string.settings_update_install_permission
+                val permissionIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${context.packageName}"),
+                )
+                runCatching { installPermissionLauncher.launch(permissionIntent) }
+                    .onFailure { actionError = R.string.settings_update_install_failed }
+            }
+        }
+    }
+
+    val availableRelease = (result as? UpdateCheckResult.UpdateAvailable)?.release
+    val latestVersion = when (val currentResult = result) {
+        is UpdateCheckResult.UpdateAvailable -> currentResult.release.version
+        is UpdateCheckResult.UpToDate -> currentResult.latestVersion
+        else -> currentVersion
+    }
+    val progress = if (totalBytes > 0L) {
+        (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+    } else {
+        null
+    }
+    val statusLabel = when {
+        checking -> stringResource(R.string.settings_update_checking)
+        downloading -> progress?.let {
+            stringResource(R.string.settings_update_downloading, (it * 100).roundToInt())
+        } ?: stringResource(R.string.settings_update_downloading_unknown)
+        downloadedApk != null -> stringResource(R.string.settings_update_downloaded)
+        checkFailed -> stringResource(R.string.settings_update_failed)
+        result is UpdateCheckResult.UpdateAvailable ->
+            stringResource(R.string.settings_update_available)
+        result is UpdateCheckResult.UpToDate -> stringResource(R.string.settings_update_latest)
+        result is UpdateCheckResult.NoReleases ->
+            stringResource(R.string.settings_update_no_releases)
+        else -> "—"
+    }
+
+    val startCheck: () -> Unit = {
+        if (!checking && !downloading) {
+            checking = true
+            checkFailed = false
+            actionError = null
+            result = null
+            downloadedApk = null
+            scope.launch {
+                runCatching { GithubUpdateService.check(currentVersion) }
+                    .onSuccess { result = it }
+                    .onFailure { checkFailed = true }
+                checking = false
+            }
+        }
+    }
+
+    val primaryAction: () -> Unit = {
+        when {
+            downloadedApk != null -> requestInstallation(requireNotNull(downloadedApk))
+            availableRelease?.apkUrl != null -> {
+                downloading = true
+                downloadedBytes = 0L
+                totalBytes = 0L
+                actionError = null
+                scope.launch {
+                    runCatching {
+                        ApkUpdateDownloader.download(context, availableRelease) { downloadProgress ->
+                            downloadedBytes = downloadProgress.downloadedBytes
+                            totalBytes = downloadProgress.totalBytes
+                        }
+                    }.onSuccess { apk ->
+                        downloadedApk = apk
+                        downloading = false
+                        requestInstallation(apk)
+                    }.onFailure {
+                        downloading = false
+                        actionError = R.string.settings_update_download_failed
+                    }
+                }
+            }
+            availableRelease != null -> {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(availableRelease.releaseUrl)),
+                    )
+                }.onFailure {
+                    actionError = R.string.settings_update_install_failed
+                }
+            }
+            else -> startCheck()
+        }
+    }
+
+    val primaryLabel = when {
+        downloadedApk != null -> stringResource(R.string.settings_update_install)
+        checking -> stringResource(R.string.settings_update_checking)
+        downloading -> progress?.let {
+            stringResource(R.string.settings_update_downloading, (it * 100).roundToInt())
+        } ?: stringResource(R.string.settings_update_downloading_unknown)
+        availableRelease?.apkUrl != null ->
+            stringResource(R.string.settings_update_download_version, availableRelease.version)
+        availableRelease != null -> stringResource(R.string.settings_update_open_release)
+        else -> stringResource(R.string.settings_update_check_action)
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            Card(shape = RoundedCornerShape(16.dp)) {
+                Column(
+                    Modifier.fillMaxWidth().padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        Image(
+                            painter = painterResource(R.drawable.ic_launcher_full),
+                            contentDescription = null,
+                            modifier = Modifier.size(72.dp).clip(RoundedCornerShape(16.dp)),
+                        )
+                        Column(
+                            Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(9.dp),
+                            ) {
+                                Text(
+                                    "Cyrene",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.primary,
+                                    shape = CircleShape,
+                                ) {
+                                    Text(
+                                        currentVersion,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
+                                }
+                            }
+                            Text(
+                                stringResource(R.string.settings_about_product_copy),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = primaryAction,
+                        enabled = !checking && !downloading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(primaryLabel)
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(shape = RoundedCornerShape(16.dp)) {
+                Column(
+                    Modifier.fillMaxWidth().padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            stringResource(R.string.settings_update_settings),
+                            modifier = Modifier.weight(1f),
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = CircleShape,
+                        ) {
+                            Text(
+                                statusLabel,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth()) {
+                        AboutVersionValue(
+                            stringResource(R.string.settings_update_current_version),
+                            currentVersion,
+                            Modifier.weight(1f),
+                        )
+                        AboutVersionValue(
+                            stringResource(R.string.settings_update_latest_version),
+                            latestVersion,
+                            Modifier.weight(1f),
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth()) {
+                        AboutVersionValue(
+                            stringResource(R.string.settings_update_channel),
+                            stringResource(R.string.settings_update_channel_github),
+                            Modifier.weight(1f),
+                        )
+                        AboutVersionValue(
+                            stringResource(R.string.settings_update_published),
+                            availableRelease?.publishedAt?.substringBefore('T')
+                                ?.takeIf(String::isNotBlank) ?: "—",
+                            Modifier.weight(1f),
+                        )
+                    }
+                    if (downloading) {
+                        if (progress != null) {
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(CircleShape),
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(CircleShape),
+                            )
+                        }
+                    }
+                    when {
+                        actionError != null -> Text(
+                            stringResource(requireNotNull(actionError)),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        checkFailed -> Text(
+                            stringResource(R.string.settings_update_failed_detail),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        result is UpdateCheckResult.NoReleases -> Text(
+                            stringResource(R.string.settings_update_no_releases_detail),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        availableRelease != null && availableRelease.apkUrl == null -> Text(
+                            stringResource(R.string.settings_update_no_apk),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    availableRelease?.notes
+                        ?.takeIf(String::isNotBlank)
+                        ?.let { notes ->
+                            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                                Text(
+                                    stringResource(R.string.settings_update_release_notes),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+                                    shape = RoundedCornerShape(10.dp),
+                                ) {
+                                    Text(
+                                        notes,
+                                        modifier = Modifier.fillMaxWidth().padding(13.dp),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        lineHeight = 19.sp,
+                                    )
+                                }
+                            }
+                        }
+                }
+            }
+        }
+
+        item {
+            SectionCard(stringResource(R.string.settings_update_related_links)) {
+                SettingsMenuRow(
+                    title = stringResource(R.string.settings_update_github_repository),
+                    subtitle = stringResource(R.string.settings_update_github_repository_hint),
+                    onClick = {
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/Yongchu-Yitao/Cyrene-mobile"),
+                            ),
+                        )
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutVersionValue(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier.padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+private fun canInstallPackages(context: Context): Boolean =
+    context.packageManager.canRequestPackageInstalls()
+
+@Suppress("DEPRECATION")
+private fun isCyreneApk(context: Context, apk: File): Boolean {
+    val archiveInfo = context.packageManager.getPackageArchiveInfo(apk.absolutePath, 0)
+    return apk.isFile && apk.length() > 0L && archiveInfo?.packageName == context.packageName
+}
+
+private fun launchApkInstaller(context: Context, apk: File) {
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.update-files",
+        apk,
+    )
+    context.startActivity(
+        Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+    )
+}
+
+@Suppress("DEPRECATION")
+private fun installedVersionName(context: Context): String {
+    val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.packageManager.getPackageInfo(
+            context.packageName,
+            android.content.pm.PackageManager.PackageInfoFlags.of(0),
+        )
+    } else {
+        context.packageManager.getPackageInfo(context.packageName, 0)
+    }
+    return packageInfo.versionName.orEmpty().ifBlank { "—" }
+}
+
+@Composable
+private fun settingsSectionDescription(sectionId: String): String = stringResource(
+    when (sectionId) {
+        "general" -> R.string.settings_section_general_description
+        "agent" -> R.string.settings_section_agent_description
+        "context" -> R.string.settings_section_context_description
+        "models" -> R.string.settings_section_models_description
+        "skills" -> R.string.settings_section_skills_description
+        "channels" -> R.string.settings_section_channels_description
+        "updates" -> R.string.settings_section_updates_description
+        "budget" -> R.string.settings_section_budget_description
+        "tool_packs" -> R.string.settings_section_tool_packs_description
+        else -> R.string.settings_section_default_description
+    },
+)
+
+@Composable
+private fun SettingsMenuRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(13.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Medium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            "›",
+            modifier = Modifier.padding(start = 12.dp),
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -1879,6 +5187,7 @@ private fun ModelSettingsCard(
     models: JSONObject,
     busy: Boolean,
     model: MainViewModel,
+    showTitle: Boolean = true,
 ) {
     val customModels = models.optJSONArray("custom_models") ?: JSONArray()
     val visionModels = models.optJSONArray("vision_models") ?: JSONArray()
@@ -2093,7 +5402,9 @@ private fun ModelSettingsCard(
         )
     }
 
-    SectionCard(stringResource(R.string.settings_models_title)) {
+    SectionCard(
+        if (showTitle) stringResource(R.string.settings_models_title) else null,
+    ) {
         Text(
             stringResource(R.string.settings_models_description),
             style = MaterialTheme.typography.bodySmall,
@@ -2332,10 +5643,12 @@ private fun HeroCard(title: String, subtitle: String, badge: String) {
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun SectionCard(title: String?, content: @Composable ColumnScope.() -> Unit) {
     Card(shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            Text(title, fontWeight = FontWeight.SemiBold)
+            if (title != null) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+            }
             content()
         }
     }
@@ -2395,6 +5708,8 @@ private fun LabelValue(label: String, value: String) {
 @Composable
 private fun ConversationMessage(
     message: JSONObject,
+    state: MobileUiState,
+    model: MainViewModel,
     onEdit: () -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -2404,7 +5719,16 @@ private fun ConversationMessage(
         message.optString("createdAt").ifBlank { message.optString("created_at") }
     )
     if (role == "user") {
-        UserMessage(content, timestamp, onEdit, onRetry)
+        UserMessage(
+            content = content,
+            attachments = message.optJSONArray("attachments"),
+            state = state,
+            model = model,
+            timestamp = timestamp,
+            deliveryState = message.optString("deliveryState"),
+            onEdit = onEdit,
+            onRetry = onRetry,
+        )
         return
     }
     val trace = message.optJSONArray("trace")
@@ -2418,7 +5742,23 @@ private fun ConversationMessage(
             ExecutionCard(entries = emptyList(), running = false)
         }
         if (content.isNotBlank()) {
-            AssistantMessage(content, timestamp, running = false)
+            AssistantMessage(
+                content = content,
+                timestamp = timestamp,
+                running = false,
+                attachments = message.optJSONArray("attachments"),
+                state = state,
+                model = model,
+            )
+        } else if ((message.optJSONArray("attachments")?.length() ?: 0) > 0) {
+            AssistantMessage(
+                content = "",
+                timestamp = timestamp,
+                running = false,
+                attachments = message.optJSONArray("attachments"),
+                state = state,
+                model = model,
+            )
         }
     }
 }
@@ -2426,7 +5766,11 @@ private fun ConversationMessage(
 @Composable
 private fun UserMessage(
     content: String,
+    attachments: JSONArray?,
+    state: MobileUiState,
+    model: MainViewModel,
     timestamp: String,
+    deliveryState: String,
     onEdit: () -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -2444,19 +5788,44 @@ private fun UserMessage(
                 )
             }
             Surface(
-                color = Color(0xFFF2ECFF),
+                color = MaterialTheme.colorScheme.secondaryContainer,
                 shape = RoundedCornerShape(13.dp, 13.dp, 4.dp, 13.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFD9C7FF)),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.secondary.copy(alpha = .55f),
+                ),
                 modifier = Modifier.widthIn(max = 310.dp),
             ) {
-                Text(
-                    content,
-                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
-                    fontSize = 15.sp,
-                    lineHeight = 24.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
+                Column(Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
+                    if (content.isNotBlank()) {
+                        Text(
+                            content,
+                            modifier = Modifier.padding(horizontal = 3.dp),
+                            fontSize = 15.sp,
+                            lineHeight = 24.sp,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                    InlineMessageAttachments(
+                        attachments = attachments,
+                        state = state,
+                        model = model,
+                        modifier = Modifier.padding(top = if (content.isBlank()) 0.dp else 8.dp),
+                    )
+                }
             }
+        }
+        when (deliveryState) {
+            "sending" -> Text(
+                stringResource(R.string.chat_message_sending),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            "failed" -> Text(
+                stringResource(R.string.chat_message_send_failed),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) {
@@ -2480,13 +5849,68 @@ private fun UserMessage(
 }
 
 @Composable
-private fun AssistantMessage(content: String, timestamp: String, running: Boolean) {
+private fun RunErrorMessage(
+    message: String,
+    retryEnabled: Boolean,
+    onRetry: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(13.dp),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                stringResource(R.string.chat_run_failed),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp,
+            )
+            Text(message, fontSize = 14.sp, lineHeight = 21.sp)
+            OutlinedButton(
+                onClick = onRetry,
+                enabled = retryEnabled,
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(stringResource(R.string.chat_retry_message))
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantMessage(
+    content: String,
+    timestamp: String,
+    running: Boolean,
+    attachments: JSONArray? = null,
+    state: MobileUiState? = null,
+    model: MainViewModel? = null,
+) {
     val clipboard = LocalClipboardManager.current
     Column(
         Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        MarkdownMessage(content)
+        if (content.isNotBlank()) {
+            MarkdownMessage(content)
+        }
+        if (state != null && model != null) {
+            InlineMessageAttachments(
+                attachments = attachments,
+                state = state,
+                model = model,
+            )
+        }
         if (running) {
             Box(
                 Modifier
@@ -2520,6 +5944,277 @@ private fun AssistantMessage(content: String, timestamp: String, running: Boolea
 }
 
 @Composable
+private fun InlineMessageAttachments(
+    attachments: JSONArray?,
+    state: MobileUiState,
+    model: MainViewModel,
+    modifier: Modifier = Modifier,
+) {
+    if (attachments == null || attachments.length() == 0) return
+    val files = remember(attachments.toString()) {
+        (0 until attachments.length()).mapNotNull(attachments::optJSONObject)
+    }
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        files.forEach { file ->
+            if (isImageAttachment(file)) {
+                val attachmentKey =
+                    "${state.selectedChat?.optString("id").orEmpty()}::${file.optString("id")}"
+                InlineChatImage(
+                    file = file,
+                    thumbnailPath = state.inlineAttachmentPaths[attachmentKey],
+                    thumbnailLoading =
+                        attachmentKey in state.inlineAttachmentLoading,
+                    thumbnailFailed =
+                        attachmentKey in state.inlineAttachmentErrors,
+                    fullImagePath = state.fullImagePaths[attachmentKey],
+                    fullImageLoading = attachmentKey in state.fullImageLoading,
+                    fullImageFailed = attachmentKey in state.fullImageErrors,
+                    onLoadThumbnail = { model.loadInlineChatImage(file) },
+                    onLoadFullImage = { model.loadFullChatImage(file) },
+                )
+            } else {
+                InlineFileAttachment(file = file, onOpen = { model.previewChatAttachment(file) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineChatImage(
+    file: JSONObject,
+    thumbnailPath: String?,
+    thumbnailLoading: Boolean,
+    thumbnailFailed: Boolean,
+    fullImagePath: String?,
+    fullImageLoading: Boolean,
+    fullImageFailed: Boolean,
+    onLoadThumbnail: () -> Unit,
+    onLoadFullImage: () -> Unit,
+) {
+    val name = file.optString("name", stringResource(R.string.chat_image_attachment))
+    var thumbnailBitmap by remember(thumbnailPath) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+    var fullImageBitmap by remember(fullImagePath) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+    var previewOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(file.optString("id"), thumbnailPath) {
+        if (thumbnailPath == null) {
+            onLoadThumbnail()
+        } else {
+            thumbnailBitmap = withContext(Dispatchers.IO) {
+                decodeSampledBitmap(thumbnailPath, maxDimension = 1100)?.asImageBitmap()
+            }
+        }
+    }
+    LaunchedEffect(previewOpen, fullImagePath) {
+        if (previewOpen) {
+            if (fullImagePath == null) {
+                onLoadFullImage()
+            } else {
+                fullImageBitmap = withContext(Dispatchers.IO) {
+                    decodeSampledBitmap(fullImagePath, maxDimension = 2600)?.asImageBitmap()
+                }
+            }
+        }
+    }
+    val width = file.optInt("width")
+    val height = file.optInt("height")
+    val ratio = if (width > 0 && height > 0) {
+        (width.toFloat() / height.toFloat()).coerceIn(.65f, 1.8f)
+    } else {
+        1f
+    }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 420.dp)
+            .aspectRatio(ratio)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(enabled = thumbnailBitmap != null) { previewOpen = true },
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .65f),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = .65f),
+        ),
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val loadedBitmap = thumbnailBitmap
+            if (loadedBitmap != null) {
+                Image(
+                    bitmap = loadedBitmap,
+                    contentDescription = name,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                )
+            } else if (thumbnailFailed) {
+                OutlinedButton(onClick = onLoadThumbnail) {
+                    Icon(
+                        Icons.Outlined.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(stringResource(R.string.chat_image_retry))
+                }
+            } else if (thumbnailLoading || thumbnailPath == null) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp)
+            } else {
+                Text(
+                    stringResource(R.string.chat_image_unavailable),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+    if (previewOpen && thumbnailBitmap != null) {
+        Dialog(
+            onDismissRequest = { previewOpen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp)
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+                color = Color.Black.copy(alpha = .96f),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    val previewBitmap = fullImageBitmap ?: requireNotNull(thumbnailBitmap)
+                    Image(
+                        bitmap = previewBitmap,
+                        contentDescription = name,
+                        modifier = Modifier.fillMaxSize().padding(8.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                    if (fullImageLoading || (fullImagePath != null && fullImageBitmap == null)) {
+                        Surface(
+                            color = Color.Black.copy(alpha = .62f),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color.White,
+                                )
+                                Spacer(Modifier.width(9.dp))
+                                Text(
+                                    stringResource(R.string.chat_image_loading_original),
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    } else if (fullImageFailed) {
+                        OutlinedButton(
+                            onClick = onLoadFullImage,
+                            colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color.White,
+                            ),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.chat_image_retry_original))
+                        }
+                    }
+                    IconButton(
+                        onClick = { previewOpen = false },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .background(Color.Black.copy(alpha = .55f), CircleShape),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = stringResource(R.string.action_close),
+                            tint = Color.White,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineFileAttachment(file: JSONObject, onOpen: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+        shape = RoundedCornerShape(11.dp),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f),
+        ),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Outlined.AttachFile,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                file.optString("name", stringResource(R.string.right_sidebar_unknown_file_type)),
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+private fun isImageAttachment(file: JSONObject): Boolean {
+    val mediaType = file.optString("content_type")
+        .ifBlank { file.optString("media_type") }
+        .substringBefore(';')
+        .trim()
+        .lowercase()
+    val name = file.optString("name").lowercase()
+    return file.optString("kind").equals("image", ignoreCase = true) ||
+        mediaType.startsWith("image/") ||
+        name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") ||
+        name.endsWith(".webp") || name.endsWith(".gif") || name.endsWith(".bmp")
+}
+
+private fun decodeSampledBitmap(path: String, maxDimension: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sampleSize = 1
+    while (
+        bounds.outWidth / (sampleSize * 2) >= maxDimension ||
+        bounds.outHeight / (sampleSize * 2) >= maxDimension
+    ) {
+        sampleSize *= 2
+    }
+    return BitmapFactory.decodeFile(
+        path,
+        BitmapFactory.Options().apply { inSampleSize = sampleSize },
+    )
+}
+
+@Composable
 private fun MarkdownMessage(content: String) {
     val context = LocalContext.current
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
@@ -2550,9 +6245,12 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
     val normalized = normalizeTraceEntries(entries)
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFFF5FAF7),
+        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = .72f),
         shape = RoundedCornerShape(13.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFB8DDC7)),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.tertiary.copy(alpha = .52f),
+        ),
     ) {
         Column(
             Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
@@ -2562,6 +6260,7 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                 stringResource(R.string.chat_execution),
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
             )
             if (normalized.isEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2569,6 +6268,7 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(17.dp),
                             strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.tertiary,
                         )
                         Spacer(Modifier.width(10.dp))
                     }
@@ -2576,7 +6276,7 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                         stringResource(
                             if (running) R.string.chat_thinking else R.string.chat_execution_complete
                         ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = .78f),
                         fontSize = 14.sp,
                     )
                 }
@@ -2587,12 +6287,13 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                             CircularProgressIndicator(
                                 modifier = Modifier.padding(top = 2.dp).size(16.dp),
                                 strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.tertiary,
                             )
                         } else {
                             Text(
                                 if (entry.failed) "×" else "✓",
                                 color = if (entry.failed) MaterialTheme.colorScheme.error
-                                else Color(0xFF16864B),
+                                else MaterialTheme.colorScheme.tertiary,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp,
                             )
@@ -2600,7 +6301,7 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                         Spacer(Modifier.width(10.dp))
                         Text(
                             entry.label,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
                             fontWeight = FontWeight.Medium,
                             fontSize = 14.sp,
                             lineHeight = 20.sp,
@@ -2661,6 +6362,25 @@ private fun formatChatTime(raw: String): String {
         ?: return raw.takeLast(5)
     return DateTimeFormatter.ofPattern("HH:mm")
         .withZone(ZoneId.systemDefault())
+        .format(instant)
+}
+
+private fun formatChatListTimestamp(raw: String): String {
+    if (raw.isBlank()) return ""
+    val instant = runCatching { Instant.parse(raw) }.getOrNull()
+        ?: runCatching { OffsetDateTime.parse(raw).toInstant() }.getOrNull()
+        ?: return raw
+    val zone = ZoneId.systemDefault()
+    val localDate = instant.atZone(zone).toLocalDate()
+    val today = java.time.LocalDate.now(zone)
+    val pattern = when {
+        localDate == today -> "HH:mm"
+        localDate.year == today.year -> "MM-dd HH:mm"
+        else -> "yyyy-MM-dd"
+    }
+    return DateTimeFormatter.ofPattern(pattern)
+        .withLocale(Locale.getDefault())
+        .withZone(zone)
         .format(instant)
 }
 

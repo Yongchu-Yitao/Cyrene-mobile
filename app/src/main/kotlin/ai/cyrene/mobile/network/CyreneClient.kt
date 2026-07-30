@@ -267,7 +267,8 @@ class CyreneClient(
 
     companion object {
         private val SIDE_EFFECTS = setOf(
-            "chats.create", "chats.send", "runs.guide", "runs.interrupt",
+            "chats.create", "chats.update", "chats.delete", "chats.send",
+            "runs.guide", "runs.interrupt",
             "tasks.create", "tasks.dispatch", "tasks.approve_plan", "tasks.run_step",
             "tasks.pause", "tasks.resume", "tasks.cancel", "approvals.respond",
             "settings.update", "shell.open", "shell.write", "shell.close",
