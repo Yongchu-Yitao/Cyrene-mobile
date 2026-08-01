@@ -272,6 +272,7 @@ class CyreneClient(
             "tasks.create", "tasks.dispatch", "tasks.approve_plan", "tasks.run_step",
             "tasks.pause", "tasks.resume", "tasks.cancel", "approvals.respond",
             "settings.update", "shell.open", "shell.write", "shell.close",
+            "settings.openai_oauth.login", "settings.openai_oauth.logout",
         )
     }
 }

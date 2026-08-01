@@ -2,6 +2,7 @@ package ai.cyrene.mobile.data
 
 import android.content.Context
 import android.os.Build
+import ai.cyrene.mobile.PermissionMode
 import ai.cyrene.mobile.protocol.MobileIdentity
 import ai.cyrene.mobile.protocol.Peer
 import ai.cyrene.mobile.protocol.b64Url
@@ -133,6 +134,14 @@ class SecureStore(context: Context) {
     fun saveUiLanguage(value: String) {
         require(value in setOf("", "en", "zh-CN"))
         preferences.edit().putString("ui_language", value).apply()
+    }
+
+    fun permissionMode(): PermissionMode = PermissionMode.fromWireValue(
+        preferences.getString("permission_mode", PermissionMode.AUTO.wireValue)
+    )
+
+    fun savePermissionMode(value: PermissionMode) {
+        preferences.edit().putString("permission_mode", value.wireValue).apply()
     }
 
     companion object {

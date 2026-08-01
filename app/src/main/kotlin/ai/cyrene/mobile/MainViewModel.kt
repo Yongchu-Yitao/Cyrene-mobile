@@ -46,6 +46,8 @@ data class MobileUiState(
     val status: String = "",
     val projects: List<JSONObject> = emptyList(),
     val selectedProject: JSONObject? = null,
+    val projectChats: Map<String, List<JSONObject>> = emptyMap(),
+    val projectTasks: Map<String, List<JSONObject>> = emptyMap(),
     val chats: List<JSONObject> = emptyList(),
     val selectedChat: JSONObject? = null,
     val tasks: List<JSONObject> = emptyList(),
@@ -75,9 +77,13 @@ data class MobileUiState(
     val terminalSessionStatus: String = "disconnected",
     val uiTheme: String = "system",
     val uiLanguage: String = "",
+    val permissionMode: PermissionMode = PermissionMode.AUTO,
     val desktopSettings: JSONObject? = null,
     val desktopSettingsSchema: JSONObject? = null,
     val desktopModels: JSONObject? = null,
+    val desktopOpenAiOAuth: JSONObject? = null,
+    val desktopOpenAiOAuthLoading: Boolean = false,
+    val desktopOpenAiOAuthAuthUrl: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -102,11 +108,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         terminalLines = emptyList(),
         uiTheme = store.uiTheme(),
         uiLanguage = store.uiLanguage(),
+        permissionMode = store.permissionMode(),
     )
 
     private val _state = MutableStateFlow(initialState(store.peer()))
     val state = _state.asStateFlow()
     private var terminalPollJob: Job? = null
+    private var openAiOAuthPollJob: Job? = null
     private var terminalProjectId = ""
     private var terminalCursor = 0
     private var terminalCommandSent = false
@@ -221,6 +229,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backgroundSyncJob = null
         terminalPollJob?.cancel()
         terminalPollJob = null
+        openAiOAuthPollJob?.cancel()
+        openAiOAuthPollJob = null
         terminalProjectId = ""
         terminalCursor = 0
         terminalCommandSent = false
@@ -237,6 +247,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setUiLanguage(value: String) {
         store.saveUiLanguage(value)
         _state.value = _state.value.copy(uiLanguage = value)
+    }
+
+    fun setPermissionMode(value: PermissionMode) {
+        store.savePermissionMode(value)
+        _state.value = _state.value.copy(permissionMode = value)
     }
 
     fun loadDesktopSettings() {
@@ -301,6 +316,92 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 status = text(R.string.status_models_saved),
             )
         }
+
+    fun loadDesktopOpenAiOAuth() {
+        if (_state.value.desktopOpenAiOAuthLoading) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(desktopOpenAiOAuthLoading = true)
+            runCatching {
+                client.command(requirePeer(), "settings.openai_oauth.read")
+            }.onSuccess { result ->
+                _state.value = _state.value.copy(desktopOpenAiOAuth = result)
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    desktopOpenAiOAuth = JSONObject()
+                        .put("available", false)
+                        .put("connected", false)
+                        .put("models", JSONArray())
+                        .put("error", error.message ?: text(R.string.error_generic)),
+                )
+            }
+            _state.value = _state.value.copy(desktopOpenAiOAuthLoading = false)
+        }
+    }
+
+    fun startDesktopOpenAiOAuthLogin() {
+        openAiOAuthPollJob?.cancel()
+        openAiOAuthPollJob = viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(
+                desktopOpenAiOAuthLoading = true,
+                desktopOpenAiOAuthAuthUrl = null,
+                error = null,
+            )
+            runCatching {
+                client.command(requirePeer(), "settings.openai_oauth.login")
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    desktopOpenAiOAuthLoading = false,
+                    error = error.message ?: text(R.string.error_generic),
+                    status = text(R.string.status_need_attention),
+                )
+            }.onSuccess { result ->
+                val authUrl = result.optString("authUrl")
+                    .ifBlank { result.optString("auth_url") }
+                    .ifBlank { result.optString("url") }
+                _state.value = _state.value.copy(
+                    desktopOpenAiOAuthAuthUrl = authUrl.ifBlank { null },
+                )
+
+                var attempts = 0
+                while (isActive && attempts < 40) {
+                    delay(1_500)
+                    attempts += 1
+                    val snapshot = runCatching {
+                        client.command(requirePeer(), "settings.openai_oauth.read")
+                    }.getOrNull() ?: continue
+                    _state.value = _state.value.copy(desktopOpenAiOAuth = snapshot)
+                    if (snapshot.optBoolean("connected")) break
+                }
+                _state.value = _state.value.copy(desktopOpenAiOAuthLoading = false)
+            }
+        }
+    }
+
+    fun clearDesktopOpenAiOAuthAuthUrl() {
+        _state.value = _state.value.copy(desktopOpenAiOAuthAuthUrl = null)
+    }
+
+    fun logoutDesktopOpenAiOAuth() {
+        openAiOAuthPollJob?.cancel()
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(
+                desktopOpenAiOAuthLoading = true,
+                error = null,
+            )
+            runCatching {
+                client.command(requirePeer(), "settings.openai_oauth.logout")
+                client.command(requirePeer(), "settings.openai_oauth.read")
+            }.onSuccess { result ->
+                _state.value = _state.value.copy(desktopOpenAiOAuth = result)
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    error = error.message ?: text(R.string.error_generic),
+                    status = text(R.string.status_need_attention),
+                )
+            }
+            _state.value = _state.value.copy(desktopOpenAiOAuthLoading = false)
+        }
+    }
 
     fun dismissError() {
         _state.value = _state.value.copy(error = null)
@@ -388,6 +489,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val selectedTaskId = _state.value.selectedTask?.optString("id").orEmpty()
         _state.value = _state.value.copy(
             selectedProject = project,
+            projectChats = _state.value.projectChats + (project.getString("id") to chats),
+            projectTasks = _state.value.projectTasks + (project.getString("id") to tasks),
             chats = chats,
             tasks = tasks,
             selectedChat = if (resetSelection) null else _state.value.selectedChat?.takeIf {
@@ -423,7 +526,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendNewChatMessage(
         message: String,
-        planMode: Boolean,
+        permissionMode: PermissionMode,
         attachments: List<PendingAttachment> = emptyList(),
     ) {
         if (_state.value.creatingChat) return
@@ -464,7 +567,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     projectId = projectId,
                     chat = chat,
                     content = content,
-                    planMode = planMode,
+                    permissionMode = permissionMode,
                     attachments = attachments,
                 )
             }.onFailure { error ->
@@ -481,9 +584,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun renameChat(chat: JSONObject, requestedTitle: String) {
+    fun renameChat(project: JSONObject, chat: JSONObject, requestedTitle: String) {
         val peer = _state.value.peer ?: return
-        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        val projectId = project.optString("id")
         val chatId = chat.optString("id")
         val title = requestedTitle.trim()
         if (projectId.isBlank() || chatId.isBlank() || title.isBlank()) return
@@ -504,6 +607,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { updatedChat ->
                 if (
                     updatedChat != null &&
+                    _state.value.selectedProject?.optString("id") == projectId &&
                     _state.value.selectedChat?.optString("id") == chatId
                 ) {
                     updateCache(peer.deviceId) { previous ->
@@ -527,9 +631,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun deleteChat(chat: JSONObject) {
+    fun deleteChat(project: JSONObject, chat: JSONObject) {
         val peer = _state.value.peer ?: return
-        val projectId = _state.value.selectedProject?.optString("id").orEmpty()
+        val projectId = project.optString("id")
         val chatId = chat.optString("id")
         if (projectId.isBlank() || chatId.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -545,7 +649,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     previous.copy(chatDetails = previous.chatDetails - chatId)
                 }
                 reloadChats(peer, projectId)
-                if (_state.value.selectedChat?.optString("id") == chatId) {
+                if (
+                    _state.value.selectedProject?.optString("id") == projectId &&
+                    _state.value.selectedChat?.optString("id") == chatId
+                ) {
                     val nextChat = _state.value.chats.firstOrNull()
                     _state.value = _state.value.copy(
                         selectedChat = null,
@@ -597,9 +704,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openChat(project: JSONObject, chat: JSONObject) {
+        selectProjectForSession(project)
+        openChat(chat)
+    }
+
     fun sendMessage(
         message: String,
-        planMode: Boolean,
+        permissionMode: PermissionMode,
         attachments: List<PendingAttachment> = emptyList(),
     ) {
         val content = message.trim()
@@ -612,7 +724,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 projectId = projectId,
                 chat = chat,
                 content = content,
-                planMode = planMode,
+                permissionMode = permissionMode,
                 attachments = attachments,
             )
         }
@@ -623,7 +735,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         projectId: String,
         chat: JSONObject,
         content: String,
-        planMode: Boolean,
+        permissionMode: PermissionMode,
         attachments: List<PendingAttachment>,
     ) {
         val chatId = chat.getString("id")
@@ -649,7 +761,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("chat_id", chatId)
                     .put("message", content)
                     .put("attachments", encodedAttachments)
-                    .put("permission_mode", if (planMode) "plan" else "default")
+                    .put("permission_mode", permissionMode.wireValue)
                     .put("language", "zh"),
                 timeoutSeconds = 50,
             )
@@ -802,7 +914,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("chat_id", chat.getString("id"))
                     .put("question_id", questionId)
                     .put("answer", answer.trim())
-                    .put("permission_mode", "default"),
+                    .put("permission_mode", _state.value.permissionMode.approvalWireValue()),
+                timeoutSeconds = 55,
+            )
+            _state.value = _state.value.copy(
+                runEvents = _state.value.runEvents.filterNot {
+                    it.optString("type") == "awaiting_user"
+                },
             )
             loadChat(peer, projectId, chat, clearEvents = false)
         }
@@ -835,6 +953,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openTask(project: JSONObject, task: JSONObject) {
+        selectProjectForSession(project)
+        openTask(task)
+    }
+
+    private fun selectProjectForSession(project: JSONObject) {
+        val projectId = project.optString("id")
+        val data = cachedData.projectData[projectId] ?: CachedProjectData(
+            chats = _state.value.projectChats[projectId].orEmpty(),
+            tasks = _state.value.projectTasks[projectId].orEmpty(),
+        )
+        applyProjectData(project, data, resetSelection = true)
+    }
+
     private suspend fun loadTask(peer: Peer, projectId: String, task: JSONObject) {
         val result = client.command(
             peer, "tasks.read", projectId,
@@ -847,12 +979,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ).optJSONArray("artifacts").objects()
         val taskId = detail.getString("id")
         updateCache(peer.deviceId) { previous ->
+            val projectData = previous.projectData[projectId] ?: CachedProjectData()
             previous.copy(
+                projectData = previous.projectData + (
+                    projectId to projectData.copy(
+                        tasks = replaceSession(projectData.tasks, detail),
+                    )
+                ),
                 taskDetails = previous.taskDetails + (taskId to detail),
                 taskArtifacts = previous.taskArtifacts + (taskId to artifacts),
             )
         }
-        _state.value = _state.value.copy(selectedTask = detail, artifacts = artifacts)
+        val projectTasks = replaceSession(
+            _state.value.projectTasks[projectId].orEmpty(),
+            detail,
+        )
+        _state.value = _state.value.copy(
+            selectedTask = detail,
+            projectTasks = _state.value.projectTasks + (projectId to projectTasks),
+            tasks = if (_state.value.selectedProject?.optString("id") == projectId) {
+                projectTasks
+            } else {
+                _state.value.tasks
+            },
+            artifacts = artifacts,
+        )
     }
 
     fun taskAction(
@@ -865,7 +1016,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val payload = JSONObject().put("task_id", task.getString("id"))
             if (command == "tasks.dispatch") {
                 payload.put("message", message.trim())
-                    .put("permission_mode", "default")
+                    .put("permission_mode", _state.value.permissionMode.taskWireValue())
                     .put("attachments", encodeAttachments(attachments))
             }
             client.command(peer, command, projectId, payload, timeoutSeconds = 50)
@@ -913,7 +1064,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("task_id", task.getString("id"))
                     .put("step_id", stepId)
                     .put("message", message.trim().ifBlank { text(R.string.default_run_step_message) })
-                    .put("permission_mode", "default"),
+                    .put("permission_mode", _state.value.permissionMode.taskWireValue()),
                 timeoutSeconds = 55,
             )
             loadTask(peer, projectId, task)
@@ -928,7 +1079,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("task_id", task.getString("id"))
                     .put("question_id", questionId)
                     .put("answer", answer.trim())
-                    .put("permission_mode", "default"),
+                    .put("permission_mode", _state.value.permissionMode.approvalWireValue()),
+                timeoutSeconds = 55,
             )
             loadTask(peer, projectId, task)
         }
@@ -1534,7 +1686,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 projectData = previous.projectData + (projectId to existing.copy(chats = chats)),
             )
         }
-        _state.value = _state.value.copy(chats = chats)
+        _state.value = _state.value.copy(
+            projectChats = _state.value.projectChats + (projectId to chats),
+            chats = if (_state.value.selectedProject?.optString("id") == projectId) {
+                chats
+            } else {
+                _state.value.chats
+            },
+        )
     }
 
     private suspend fun loadChat(
@@ -1550,10 +1709,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val detail = result.optJSONObject("chat") ?: chat
         val chatId = detail.optString("id").ifBlank { chat.getString("id") }
         updateCache(peer.deviceId) { previous ->
-            previous.copy(chatDetails = previous.chatDetails + (chatId to detail))
+            val projectData = previous.projectData[projectId] ?: CachedProjectData()
+            previous.copy(
+                projectData = previous.projectData + (
+                    projectId to projectData.copy(
+                        chats = replaceSession(projectData.chats, detail),
+                    )
+                ),
+                chatDetails = previous.chatDetails + (chatId to detail),
+            )
         }
+        val projectChats = replaceSession(
+            _state.value.projectChats[projectId].orEmpty(),
+            detail,
+        )
         _state.value = _state.value.copy(
             selectedChat = detail,
+            projectChats = _state.value.projectChats + (projectId to projectChats),
+            chats = if (_state.value.selectedProject?.optString("id") == projectId) {
+                projectChats
+            } else {
+                _state.value.chats
+            },
             runEvents = if (clearEvents) emptyList() else _state.value.runEvents,
         )
     }
@@ -1567,7 +1744,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 projectData = previous.projectData + (projectId to existing.copy(tasks = tasks)),
             )
         }
-        _state.value = _state.value.copy(tasks = tasks)
+        _state.value = _state.value.copy(
+            projectTasks = _state.value.projectTasks + (projectId to tasks),
+            tasks = if (_state.value.selectedProject?.optString("id") == projectId) {
+                tasks
+            } else {
+                _state.value.tasks
+            },
+        )
     }
 
     private fun refreshChatInBackground(chat: JSONObject) {
@@ -1627,6 +1811,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(
             projects = projects,
             selectedProject = selectedProject,
+            projectChats = snapshot.projectData.mapValues { it.value.chats },
+            projectTasks = snapshot.projectData.mapValues { it.value.tasks },
             chats = projectData.chats,
             tasks = projectData.tasks,
             status = text(R.string.status_cached_projects, projects.size),
@@ -1670,7 +1856,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             projectData = snapshot.projectData + (projectId to data),
                         )
                     }
-                    publishProjectListsIfSelected(project, data)
+                    publishProjectLists(project, data)
                     setBackgroundProgress(0.2f * (index + 1) / projects.size)
                 }
 
@@ -1793,11 +1979,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(backgroundSyncProgress = value.coerceIn(0f, 1f))
     }
 
-    private fun publishProjectListsIfSelected(
+    private fun publishProjectLists(
         project: JSONObject,
         data: CachedProjectData,
     ) {
-        if (_state.value.selectedProject?.optString("id") == project.optString("id")) {
+        val projectId = project.optString("id")
+        _state.value = _state.value.copy(
+            projectChats = _state.value.projectChats + (projectId to data.chats),
+            projectTasks = _state.value.projectTasks + (projectId to data.tasks),
+        )
+        if (_state.value.selectedProject?.optString("id") == projectId) {
             applyProjectData(project, data, resetSelection = false)
         }
     }
@@ -1870,6 +2061,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         deviceLoadJob?.cancel()
         backgroundSyncJob?.cancel()
         terminalPollJob?.cancel()
+        openAiOAuthPollJob?.cancel()
         client.close()
         super.onCleared()
     }
@@ -1877,3 +2069,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 private fun JSONArray?.objects(): List<JSONObject> =
     if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
+
+private fun replaceSession(
+    sessions: List<JSONObject>,
+    replacement: JSONObject,
+): List<JSONObject> {
+    val replacementId = replacement.optString("id")
+    if (replacementId.isBlank()) return sessions
+    var replaced = false
+    val updated = sessions.map { session ->
+        if (session.optString("id") == replacementId) {
+            replaced = true
+            replacement
+        } else {
+            session
+        }
+    }
+    return if (replaced) updated else updated + replacement
+}

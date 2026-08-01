@@ -11,6 +11,7 @@
     <string name="menu_open">打开导航菜单</string>
     <string name="menu_recent_sessions">所有会话</string>
     <string name="menu_no_recent_sessions">暂无最近任务或对话</string>
+    <string name="menu_project_session_summary">%1$s · %2$s</string>
     <string name="menu_chat_summary">对话 · %1$d 条消息 · %2$s</string>
     <string name="menu_task_summary">任务 · %1$s</string>
     <string name="chat_menu_rename">重命名</string>
@@ -122,6 +123,8 @@
     <string name="projects_description">桌面端是数据权威来源</string>
     <string name="projects_empty">桌面端尚未向此设备授权项目</string>
     <string name="project_unnamed">未命名项目</string>
+    <string name="project_select">选择项目</string>
+    <string name="project_choose">选择项目</string>
     <string name="project_current">当前</string>
     <string name="project_select_first">请先在「项目」中选择一个授权项目</string>
 
@@ -131,6 +134,7 @@
     <string name="chat_new">新对话</string>
     <string name="chat_welcome_title">开始一段新对话</string>
     <string name="chat_welcome_description">对话与当前工作区绑定，Agent 可以读取项目上下文。</string>
+    <string name="chat_current_project">当前项目：%1$s</string>
     <string name="drawer_new_chat_label">聊天</string>
     <string name="chats_empty">这个项目还没有对话</string>
     <string name="chat_unnamed">未命名对话</string>
@@ -154,12 +158,18 @@
     <string name="chat_message_send_failed">发送失败</string>
     <string name="chat_run_failed">Agent 回复失败</string>
     <string name="chat_composer_desktop">给 Cyrene 发消息…</string>
+    <string name="chat_mode_auto">自动模式</string>
+    <string name="chat_mode_auto_desc">自动审核权限请求</string>
     <string name="chat_mode_default">默认模式</string>
-    <string name="chat_mode_default_desc">让 Cyrene 直接完成任务</string>
+    <string name="chat_mode_default_desc">敏感操作前先询问你</string>
     <string name="chat_mode_plan">Plan 模式</string>
     <string name="chat_mode_plan_desc">执行改动前先生成计划</string>
     <string name="chat_add_attachment">添加附件</string>
     <string name="chat_remove_attachment">移除附件</string>
+    <string name="approval_permission_title">需要授权</string>
+    <string name="approval_confirmation_title">需要确认</string>
+    <string name="approval_prompt_fallback">Cyrene 需要你的确认才能继续。</string>
+    <string name="approval_custom_answer">或输入自定义回答</string>
     <string name="error_attachment_read">无法读取附件：%1$s</string>
     <string name="error_attachment_too_large">附件超过 8 MB：%1$s</string>
     <string name="error_attachments_too_large">附件总大小超过 8 MB</string>
@@ -209,8 +219,10 @@
     <string name="settings_title">设置</string>
     <string name="settings_mobile_section">Android App</string>
     <string name="settings_mobile_description">这些设置只影响当前手机。</string>
-    <string name="settings_mobile_menu_title">外观与语言</string>
-    <string name="settings_mobile_menu_description">设置当前手机的主题和界面语言。</string>
+    <string name="settings_mobile_menu_title">App 偏好设置</string>
+    <string name="settings_mobile_menu_description">设置当前手机的主题、界面语言和默认权限模式。</string>
+    <string name="settings_permission_mode">默认权限模式</string>
+    <string name="settings_permission_mode_description">默认启用自动模式。聊天支持以上三种模式，任务运行支持自动和默认模式，也可在输入框中随时切换。</string>
     <string name="settings_update_title">关于与更新</string>
     <string name="settings_update_description">版本 %1$s · GitHub 更新通道</string>
     <string name="settings_about_title">关于</string>
@@ -283,6 +295,14 @@
     <string name="settings_model_source">主要模型来源</string>
     <string name="settings_model_custom">自定义模型</string>
     <string name="settings_model_codex">OpenAI Codex</string>
+    <string name="settings_model_oauth_not_configured">尚未配置 OpenAI OAuth。请在下方登录并发现可用的 Codex 模型。</string>
+    <string name="settings_model_openai_oauth_title">OpenAI OAuth</string>
+    <string name="settings_model_oauth_connected">OpenAI 账户已连接</string>
+    <string name="settings_model_oauth_hint">将在桌面端通过 OpenAI 登录，OAuth 令牌只保留在桌面端。</string>
+    <string name="settings_model_oauth_login">登录 OpenAI</string>
+    <string name="settings_model_oauth_logout">退出登录</string>
+    <string name="settings_model_oauth_model">Codex 模型</string>
+    <string name="settings_model_oauth_use">将此模型设为主要模型</string>
     <string name="settings_model_primary_and_fallbacks">主要模型与回退候选</string>
     <string name="settings_model_primary">主要模型</string>
     <string name="settings_model_fallback">回退模型</string>

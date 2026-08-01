@@ -75,6 +75,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -97,6 +98,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -123,6 +125,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.FocusRequester
@@ -156,6 +159,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircleOutline
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Refresh
@@ -167,6 +171,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
 import ai.cyrene.mobile.data.ApkUpdateDownloader
 import ai.cyrene.mobile.data.SecureStore
 import ai.cyrene.mobile.data.GithubUpdateService
@@ -262,6 +267,20 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
         "light" -> false
         else -> isSystemInDarkTheme()
     }
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isNavigationBarContrastEnforced = false
+            }
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
     MaterialTheme(
         colorScheme = if (dark) {
             darkColorScheme(
@@ -331,16 +350,16 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
         DrawerDestination(4, stringResource(R.string.nav_terminal), Icons.Outlined.Terminal),
     )
     val aboutAndUpdatesLabel = stringResource(R.string.settings_update_title)
-    val sessions = remember(state.chats, state.tasks) {
-        (
-            state.chats.map { RecentSession("chat", it) } +
-                state.tasks.map { RecentSession("task", it) }
-            )
-            .sortedByDescending { recentSessionTimestamp(it.data) }
+    val sessions = remember(state.projects, state.projectChats, state.projectTasks) {
+        recentSessionsForProjects(
+            projects = state.projects,
+            projectChats = state.projectChats,
+            projectTasks = state.projectTasks,
+        )
     }
-    var chatMenuTarget by remember { mutableStateOf<JSONObject?>(null) }
-    var renameChatTarget by remember { mutableStateOf<JSONObject?>(null) }
-    var deleteChatTarget by remember { mutableStateOf<JSONObject?>(null) }
+    var chatMenuTarget by remember { mutableStateOf<RecentSession?>(null) }
+    var renameChatTarget by remember { mutableStateOf<RecentSession?>(null) }
+    var deleteChatTarget by remember { mutableStateOf<RecentSession?>(null) }
     var renameChatTitle by remember { mutableStateOf("") }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -360,6 +379,7 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
         LocalConfiguration.current.screenWidthDp.dp * .82f,
     )
     val rightPanelWidthPx = with(LocalDensity.current) { rightPanelWidth.toPx() }
+    val leftDrawerOpenThresholdPx = with(LocalDensity.current) { 56.dp.toPx() }
     LaunchedEffect(
         tab,
         state.selectedChat?.optString("id"),
@@ -473,34 +493,43 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                             } else {
                                 items(
                                     items = sessions,
-                                    key = { "${it.kind}-${it.data.optString("id")}" },
+                                    key = {
+                                        "${it.project.optString("id")}-${it.kind}-" +
+                                            it.data.optString("id")
+                                    },
                                 ) { session ->
                                     val data = session.data
+                                    val project = session.project
+                                    val projectId = project.optString("id")
                                     val itemId = data.optString("id")
                                     val isChat = session.kind == "chat"
                                     val selected = if (isChat) {
-                                            tab == 2 &&
+                                        tab == 2 &&
+                                                state.selectedProject?.optString("id") == projectId &&
                                                 state.selectedChat?.optString("id") == itemId
-                                        } else {
-                                            tab == 3 &&
+                                    } else {
+                                        tab == 3 &&
+                                                state.selectedProject?.optString("id") == projectId &&
                                                 state.selectedTask?.optString("id") == itemId
-                                        }
+                                    }
                                     val openSession = {
                                         chatMenuTarget = null
                                         rightPanelOpen = false
                                         if (isChat) {
                                             tab = 2
                                             if (
+                                                state.selectedProject?.optString("id") != projectId ||
                                                 state.selectedChat?.optString("id") != itemId
                                             ) {
-                                                model.openChat(data)
+                                                model.openChat(project, data)
                                             }
                                         } else {
                                             tab = 3
                                             if (
+                                                state.selectedProject?.optString("id") != projectId ||
                                                 state.selectedTask?.optString("id") != itemId
                                             ) {
-                                                model.openTask(data)
+                                                model.openTask(project, data)
                                             }
                                         }
                                         scope.launch { drawerState.close() }
@@ -509,12 +538,13 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                                     Box {
                                         RecentSessionDrawerItem(
                                             data = data,
+                                            projectName = project.optString("name"),
                                             isChat = isChat,
                                             selected = selected,
                                             onClick = openSession,
                                             onLongClick = if (isChat) {
                                                 {
-                                                    chatMenuTarget = data
+                                                    chatMenuTarget = session
                                                 }
                                             } else {
                                                 null
@@ -523,7 +553,8 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                                         DropdownMenu(
                                             expanded =
                                                 isChat &&
-                                                    chatMenuTarget?.optString("id") == itemId,
+                                                    chatMenuTarget?.data?.optString("id") == itemId &&
+                                                    chatMenuTarget?.project?.optString("id") == projectId,
                                             onDismissRequest = { chatMenuTarget = null },
                                         ) {
                                             DropdownMenuItem(
@@ -543,7 +574,7 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                                                 onClick = {
                                                     chatMenuTarget = null
                                                     renameChatTitle = data.optString("title")
-                                                    renameChatTarget = data
+                                                    renameChatTarget = session
                                                 },
                                             )
                                             DropdownMenuItem(
@@ -562,7 +593,7 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                                                 },
                                                 onClick = {
                                                     chatMenuTarget = null
-                                                    deleteChatTarget = data
+                                                    deleteChatTarget = session
                                                 },
                                             )
                                         }
@@ -635,66 +666,84 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                             rightPanelAvailable,
                             rightPanelOpen,
                             rightPanelWidthPx,
+                            leftDrawerOpenThresholdPx,
                         ) {
                             var dragDistance = 0f
+                            var openingLeftDrawer = false
                             detectHorizontalDragGestures(
-                        onDragStart = {
-                            dragDistance = 0f
-                            rightPanelRevealPx = if (rightPanelOpen) rightPanelWidthPx else 0f
-                            if (rightPanelOpen) suppressLeftDrawerGestures = true
-                        },
-                        onHorizontalDrag = { change, dragAmount ->
-                            dragDistance += dragAmount
-                            val canDragRightPanel =
-                                rightPanelAvailable &&
-                                    drawerState.currentValue == DrawerValue.Closed
-                            val handlingRightPanel = canDragRightPanel && (
-                                rightPanelDragging ||
-                                    (rightPanelOpen && dragDistance > 4f) ||
-                                    (!rightPanelOpen && dragDistance < -4f)
-                                )
-                            if (handlingRightPanel) {
-                                rightPanelDragging = true
-                                rightPanelRevealPx = if (rightPanelOpen) {
-                                    (rightPanelWidthPx - dragDistance)
-                                        .coerceIn(0f, rightPanelWidthPx)
-                                } else {
-                                    (-dragDistance).coerceIn(0f, rightPanelWidthPx)
-                                }
-                                change.consume()
-                            }
-                        },
-                        onDragEnd = {
-                            if (rightPanelDragging) {
-                                rightPanelOpen = if (rightPanelOpen) {
-                                    rightPanelRevealPx >= rightPanelWidthPx * .65f
-                                } else {
-                                    rightPanelRevealPx >= rightPanelWidthPx * .28f
-                                }
-                                rightPanelRevealPx =
-                                    if (rightPanelOpen) rightPanelWidthPx else 0f
-                            }
-                            rightPanelDragging = false
-                            if (suppressLeftDrawerGestures) {
-                                scope.launch {
-                                    delay(180)
-                                    suppressLeftDrawerGestures = false
-                                }
-                            }
-                            dragDistance = 0f
-                        },
-                        onDragCancel = {
-                            rightPanelRevealPx =
-                                if (rightPanelOpen) rightPanelWidthPx else 0f
-                            rightPanelDragging = false
-                            if (suppressLeftDrawerGestures) {
-                                scope.launch {
-                                    delay(180)
-                                    suppressLeftDrawerGestures = false
-                                }
-                            }
-                            dragDistance = 0f
-                        },
+                                onDragStart = {
+                                    dragDistance = 0f
+                                    openingLeftDrawer = false
+                                    rightPanelRevealPx =
+                                        if (rightPanelOpen) rightPanelWidthPx else 0f
+                                    if (rightPanelOpen) suppressLeftDrawerGestures = true
+                                },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    dragDistance += dragAmount
+                                    val canDragRightPanel =
+                                        rightPanelAvailable &&
+                                            drawerState.currentValue == DrawerValue.Closed
+                                    val handlingRightPanel = canDragRightPanel && (
+                                        rightPanelDragging ||
+                                            (rightPanelOpen && dragDistance > 4f) ||
+                                            (!rightPanelOpen && dragDistance < -4f)
+                                        )
+                                    if (handlingRightPanel) {
+                                        rightPanelDragging = true
+                                        rightPanelRevealPx = if (rightPanelOpen) {
+                                            (rightPanelWidthPx - dragDistance)
+                                                .coerceIn(0f, rightPanelWidthPx)
+                                        } else {
+                                            (-dragDistance).coerceIn(0f, rightPanelWidthPx)
+                                        }
+                                        change.consume()
+                                    } else if (
+                                        !rightPanelOpen &&
+                                        !rightPanelDragging &&
+                                        dragDistance > 4f
+                                    ) {
+                                        openingLeftDrawer = true
+                                        change.consume()
+                                    }
+                                },
+                                onDragEnd = {
+                                    if (rightPanelDragging) {
+                                        rightPanelOpen = if (rightPanelOpen) {
+                                            rightPanelRevealPx >= rightPanelWidthPx * .65f
+                                        } else {
+                                            rightPanelRevealPx >= rightPanelWidthPx * .28f
+                                        }
+                                        rightPanelRevealPx =
+                                            if (rightPanelOpen) rightPanelWidthPx else 0f
+                                    } else if (
+                                        openingLeftDrawer &&
+                                        dragDistance >= leftDrawerOpenThresholdPx
+                                    ) {
+                                        scope.launch { drawerState.open() }
+                                    }
+                                    rightPanelDragging = false
+                                    openingLeftDrawer = false
+                                    if (suppressLeftDrawerGestures) {
+                                        scope.launch {
+                                            delay(180)
+                                            suppressLeftDrawerGestures = false
+                                        }
+                                    }
+                                    dragDistance = 0f
+                                },
+                                onDragCancel = {
+                                    rightPanelRevealPx =
+                                        if (rightPanelOpen) rightPanelWidthPx else 0f
+                                    rightPanelDragging = false
+                                    openingLeftDrawer = false
+                                    if (suppressLeftDrawerGestures) {
+                                        scope.launch {
+                                            delay(180)
+                                            suppressLeftDrawerGestures = false
+                                        }
+                                    }
+                                    dragDistance = 0f
+                                },
                             )
                         }
                     } else {
@@ -818,7 +867,8 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
             }
         }
     }
-    renameChatTarget?.let { chat ->
+    renameChatTarget?.let { session ->
+        val chat = session.data
         AlertDialog(
             onDismissRequest = { renameChatTarget = null },
             title = { Text(stringResource(R.string.chat_rename_title)) },
@@ -840,7 +890,7 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                 Button(
                     enabled = renameChatTitle.isNotBlank() && !state.busy,
                     onClick = {
-                        model.renameChat(chat, renameChatTitle)
+                        model.renameChat(session.project, chat, renameChatTitle)
                         renameChatTarget = null
                     },
                 ) {
@@ -849,7 +899,8 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
             },
         )
     }
-    deleteChatTarget?.let { chat ->
+    deleteChatTarget?.let { session ->
+        val chat = session.data
         val chatTitle = chat.optString("title").ifBlank {
             stringResource(R.string.chat_unnamed)
         }
@@ -868,7 +919,7 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                 Button(
                     enabled = !state.busy,
                     onClick = {
-                        model.deleteChat(chat)
+                        model.deleteChat(session.project, chat)
                         deleteChatTarget = null
                     },
                 ) {
@@ -885,15 +936,11 @@ private data class DrawerDestination(
     val icon: ImageVector,
 )
 
-private data class RecentSession(
-    val kind: String,
-    val data: JSONObject,
-)
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecentSessionDrawerItem(
     data: JSONObject,
+    projectName: String,
     isChat: Boolean,
     selected: Boolean,
     onClick: () -> Unit,
@@ -933,8 +980,7 @@ private fun RecentSessionDrawerItem(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,
             )
-            Text(
-                if (isChat) {
+            val sessionSummary = if (isChat) {
                     stringResource(
                         R.string.menu_chat_summary,
                         data.optInt("message_count"),
@@ -945,7 +991,13 @@ private fun RecentSessionDrawerItem(
                         R.string.menu_task_summary,
                         localizedStatus(data.optString("status")),
                     )
-                },
+                }
+            Text(
+                stringResource(
+                    R.string.menu_project_session_summary,
+                    projectName.ifBlank { stringResource(R.string.project_unnamed) },
+                    sessionSummary,
+                ),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -953,15 +1005,6 @@ private fun RecentSessionDrawerItem(
             )
         }
     }
-}
-
-private fun recentSessionTimestamp(item: JSONObject): Long {
-    val raw = item.optString("updated_at")
-        .ifBlank { item.optString("updatedAt") }
-        .ifBlank { item.optString("created_at") }
-        .ifBlank { item.optString("createdAt") }
-    return runCatching { Instant.parse(raw).toEpochMilli() }.getOrNull()
-        ?: runCatching { OffsetDateTime.parse(raw).toInstant().toEpochMilli() }.getOrDefault(0L)
 }
 
 @Composable
@@ -3178,15 +3221,13 @@ private fun ProjectScreen(state: MobileUiState, model: MainViewModel, openChats:
 @Composable
 private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
     var message by remember { mutableStateOf("") }
-    var plan by remember { mutableStateOf(false) }
+    val selectedProjectId = state.selectedProject?.optString("id").orEmpty()
     val selectedChatId = state.selectedChat?.optString("id").orEmpty()
-    LaunchedEffect(selectedChatId) {
+    LaunchedEffect(selectedProjectId, selectedChatId) {
         if (selectedChatId.isBlank()) {
             message = ""
-            plan = false
         } else if (state.creatingChat) {
             message = ""
-            plan = false
         }
     }
     val project = state.selectedProject
@@ -3198,11 +3239,14 @@ private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
         PendingChatDetail(
             message = message,
             onMessageChange = { message = it },
-            plan = plan,
-            onPlanChange = { plan = it },
+            projects = state.projects,
+            selectedProject = project,
+            onSelectProject = model::selectProject,
+            permissionMode = state.permissionMode,
+            onPermissionModeChange = model::setPermissionMode,
             busy = state.creatingChat,
             onSend = {
-                model.sendNewChatMessage(message, plan)
+                model.sendNewChatMessage(message, state.permissionMode)
             },
         )
     } else {
@@ -3211,8 +3255,8 @@ private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
             model = model,
             message = message,
             onMessageChange = { message = it },
-            plan = plan,
-            onPlanChange = { plan = it },
+            permissionMode = state.permissionMode,
+            onPermissionModeChange = model::setPermissionMode,
         )
     }
 }
@@ -3221,13 +3265,20 @@ private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
 private fun PendingChatDetail(
     message: String,
     onMessageChange: (String) -> Unit,
-    plan: Boolean,
-    onPlanChange: (Boolean) -> Unit,
+    projects: List<JSONObject>,
+    selectedProject: JSONObject,
+    onSelectProject: (JSONObject) -> Unit,
+    permissionMode: PermissionMode,
+    onPermissionModeChange: (PermissionMode) -> Unit,
     busy: Boolean,
     onSend: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize()) {
         NewChatWelcome(
+            projects = projects,
+            selectedProject = selectedProject,
+            enabled = !busy,
+            onSelectProject = onSelectProject,
             modifier = Modifier
                 .align(Alignment.Center)
                 .padding(start = 28.dp, end = 28.dp, bottom = 124.dp),
@@ -3235,8 +3286,8 @@ private fun PendingChatDetail(
         ChatComposer(
             message = message,
             onMessageChange = onMessageChange,
-            plan = plan,
-            onPlanChange = onPlanChange,
+            permissionMode = permissionMode,
+            onPermissionModeChange = onPermissionModeChange,
             running = false,
             busy = busy,
             attachments = emptyList(),
@@ -3257,12 +3308,11 @@ private fun ChatDetail(
     model: MainViewModel,
     message: String,
     onMessageChange: (String) -> Unit,
-    plan: Boolean,
-    onPlanChange: (Boolean) -> Unit,
+    permissionMode: PermissionMode,
+    onPermissionModeChange: (PermissionMode) -> Unit,
 ) {
     val chat = state.selectedChat ?: return
     val context = LocalContext.current
-    var answer by remember { mutableStateOf("") }
     var pendingAttachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
     val attachmentPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
@@ -3273,10 +3323,7 @@ private fun ChatDetail(
             .take(5)
     }
     val messages = chat.optJSONArray("messages")
-    val pendingQuestionId = if (messages == null) "" else
-        (messages.length() - 1 downTo 0).firstNotNullOfOrNull { index ->
-            messages.optJSONObject(index)?.optString("question_id")?.takeIf(String::isNotBlank)
-        }.orEmpty()
+    val pendingQuestion = pendingApprovalQuestion(chat, state.runEvents)
     Column(Modifier.fillMaxSize()) {
         val listState = rememberLazyListState()
         val eventReply = state.runEvents
@@ -3331,7 +3378,7 @@ private fun ChatDetail(
                             onRetry = {
                                 val content = displayMessageContent(item.optString("content"))
                                 if (content.isNotBlank() && !state.busy && state.activeRunId == null) {
-                                    model.sendMessage(content, plan)
+                                    model.sendMessage(content, permissionMode)
                                 }
                             },
                         )
@@ -3361,13 +3408,17 @@ private fun ChatDetail(
                                 .ifBlank { stringResource(R.string.chat_run_failed) },
                             retryEnabled = retryContent.isNotBlank() &&
                                 !state.busy && state.activeRunId == null,
-                            onRetry = { model.sendMessage(retryContent, plan) },
+                            onRetry = { model.sendMessage(retryContent, permissionMode) },
                         )
                     }
                 }
             }
             if (transcriptCount == 0) {
                 NewChatWelcome(
+                    projects = state.projects,
+                    selectedProject = state.selectedProject ?: JSONObject(),
+                    enabled = !state.busy,
+                    onSelectProject = model::selectProject,
                     modifier = Modifier
                         .align(Alignment.Center)
                         .padding(start = 28.dp, end = 28.dp, bottom = 124.dp),
@@ -3379,38 +3430,19 @@ private fun ChatDetail(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
-                if (chat.optBoolean("awaiting_user") && pendingQuestionId.isNotBlank()) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(
-                            1.dp,
-                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f),
-                        ),
-                    ) {
-                        Column(Modifier.padding(10.dp)) {
-                            OutlinedTextField(
-                                answer, { answer = it },
-                                label = { Text(stringResource(R.string.chat_answer_prompt)) },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Button(
-                                onClick = {
-                                    model.answerChat(pendingQuestionId, answer)
-                                    answer = ""
-                                },
-                                enabled = answer.isNotBlank(),
-                                modifier = Modifier.padding(top = 6.dp),
-                            ) { Text(stringResource(R.string.chat_submit_answer)) }
-                        }
-                    }
+                if (pendingQuestion != null) {
+                    ApprovalQuestionCard(
+                        question = pendingQuestion,
+                        busy = state.busy,
+                        onAnswer = { model.answerChat(pendingQuestion.id, it) },
+                    )
                     Spacer(Modifier.height(8.dp))
                 }
                 ChatComposer(
                     message = message,
                     onMessageChange = onMessageChange,
-                    plan = plan,
-                    onPlanChange = onPlanChange,
+                    permissionMode = permissionMode,
+                    onPermissionModeChange = onPermissionModeChange,
                     running = state.activeRunId != null,
                     busy = state.busy || state.creatingChat,
                     attachments = pendingAttachments,
@@ -3420,7 +3452,7 @@ private fun ChatDetail(
                     },
                     onSend = {
                         if (state.activeRunId == null) {
-                            model.sendMessage(message, plan, pendingAttachments)
+                            model.sendMessage(message, permissionMode, pendingAttachments)
                         }
                         else model.guideRun(message)
                         onMessageChange("")
@@ -3434,7 +3466,93 @@ private fun ChatDetail(
 }
 
 @Composable
-private fun NewChatWelcome(modifier: Modifier = Modifier) {
+private fun ApprovalQuestionCard(
+    question: ApprovalQuestion,
+    busy: Boolean,
+    onAnswer: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var customAnswer by remember(question.id) { mutableStateOf("") }
+    val isPermission = question.kind.contains("permission", ignoreCase = true) ||
+        question.kind in setOf("destructive_confirmation", "external_upload_confirmation")
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.primary.copy(alpha = .45f),
+        ),
+    ) {
+        Column(
+            Modifier
+                .heightIn(max = 320.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            Text(
+                question.title.ifBlank {
+                    stringResource(
+                        if (isPermission) R.string.approval_permission_title
+                        else R.string.approval_confirmation_title,
+                    )
+                },
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                question.prompt.ifBlank {
+                    stringResource(R.string.approval_prompt_fallback)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            question.options.forEachIndexed { index, option ->
+                if (index == 0) {
+                    Button(
+                        onClick = { onAnswer(option.label) },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(option.label) }
+                } else {
+                    OutlinedButton(
+                        onClick = { onAnswer(option.label) },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(option.label) }
+                }
+            }
+            if (question.allowCustom || question.options.isEmpty()) {
+                OutlinedTextField(
+                    value = customAnswer,
+                    onValueChange = { customAnswer = it },
+                    label = { Text(stringResource(R.string.approval_custom_answer)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy,
+                    minLines = 1,
+                    maxLines = 3,
+                )
+                Button(
+                    onClick = {
+                        onAnswer(customAnswer.trim())
+                        customAnswer = ""
+                    },
+                    enabled = customAnswer.isNotBlank() && !busy,
+                ) { Text(stringResource(R.string.chat_submit_answer)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewChatWelcome(
+    projects: List<JSONObject>,
+    selectedProject: JSONObject,
+    enabled: Boolean,
+    onSelectProject: (JSONObject) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier.widthIn(max = 520.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -3468,6 +3586,90 @@ private fun NewChatWelcome(modifier: Modifier = Modifier) {
             textAlign = TextAlign.Center,
             lineHeight = 22.sp,
         )
+        Spacer(Modifier.height(10.dp))
+        CurrentProjectSelector(
+            projects = projects,
+            selectedProject = selectedProject,
+            enabled = enabled,
+            onSelect = onSelectProject,
+        )
+    }
+}
+
+@Composable
+private fun CurrentProjectSelector(
+    projects: List<JSONObject>,
+    selectedProject: JSONObject,
+    enabled: Boolean,
+    onSelect: (JSONObject) -> Unit,
+    showCurrentLabel: Boolean = true,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedId = selectedProject.optString("id")
+    val selectedName = selectedProject.optString("name")
+        .ifBlank { stringResource(R.string.project_unnamed) }
+    Box {
+        Surface(
+            onClick = { expanded = true },
+            enabled = enabled,
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .72f),
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = RoundedCornerShape(50),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    if (showCurrentLabel) {
+                        stringResource(R.string.chat_current_project, selectedName)
+                    } else {
+                        selectedName
+                    },
+                    modifier = Modifier.widthIn(
+                        max = if (showCurrentLabel) 220.dp else 120.dp,
+                    ),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    Icons.Outlined.KeyboardArrowDown,
+                    contentDescription = stringResource(R.string.project_choose),
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            projects.forEach { project ->
+                val projectId = project.optString("id")
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            project.optString("name").ifBlank {
+                                stringResource(R.string.project_unnamed)
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    trailingIcon = if (projectId == selectedId) {
+                        { Icon(Icons.Outlined.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                    onClick = {
+                        expanded = false
+                        if (projectId != selectedId) onSelect(project)
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -3503,8 +3705,8 @@ private fun pendingAttachment(context: Context, uri: Uri): PendingAttachment? {
 private fun ChatComposer(
     message: String,
     onMessageChange: (String) -> Unit,
-    plan: Boolean,
-    onPlanChange: (Boolean) -> Unit,
+    permissionMode: PermissionMode,
+    onPermissionModeChange: (PermissionMode) -> Unit,
     running: Boolean,
     busy: Boolean,
     attachments: List<PendingAttachment>,
@@ -3515,6 +3717,7 @@ private fun ChatComposer(
     placeholderRes: Int = R.string.chat_composer_desktop,
     runningPlaceholderRes: Int = R.string.chat_guide_composer,
     modeMenuEnabled: Boolean = true,
+    planModeEnabled: Boolean = true,
     interruptWhileRunning: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -3629,7 +3832,7 @@ private fun ChatComposer(
                             .clickable(enabled = !running && modeMenuEnabled) {
                                 modeMenuOpen = true
                             },
-                        color = if (plan) {
+                        color = if (permissionMode != PermissionMode.AUTO) {
                             MaterialTheme.colorScheme.primaryContainer.copy(alpha = .7f)
                         } else {
                             Color.Transparent
@@ -3644,17 +3847,20 @@ private fun ChatComposer(
                                 Icons.Outlined.Bolt,
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp),
-                                tint = if (plan) MaterialTheme.colorScheme.primary
+                                tint = if (permissionMode != PermissionMode.AUTO) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
                                 stringResource(
-                                    if (plan) R.string.chat_mode_plan
-                                    else R.string.chat_mode_default,
+                                    when (permissionMode) {
+                                        PermissionMode.AUTO -> R.string.chat_mode_auto
+                                        PermissionMode.DEFAULT -> R.string.chat_mode_default
+                                        PermissionMode.PLAN -> R.string.chat_mode_plan
+                                    },
                                 ),
                                 style = MaterialTheme.typography.labelLarge,
-                                color = if (plan) MaterialTheme.colorScheme.primary
+                                color = if (permissionMode != PermissionMode.AUTO) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Icon(
@@ -3671,6 +3877,25 @@ private fun ChatComposer(
                         DropdownMenuItem(
                             text = {
                                 Column {
+                                    Text(stringResource(R.string.chat_mode_auto))
+                                    Text(
+                                        stringResource(R.string.chat_mode_auto_desc),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            },
+                            onClick = {
+                                onPermissionModeChange(PermissionMode.AUTO)
+                                modeMenuOpen = false
+                            },
+                            trailingIcon = if (permissionMode == PermissionMode.AUTO) {
+                                { Icon(Icons.Outlined.Check, contentDescription = null) }
+                            } else null,
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Column {
                                     Text(stringResource(R.string.chat_mode_default))
                                     Text(
                                         stringResource(R.string.chat_mode_default_desc),
@@ -3680,26 +3905,34 @@ private fun ChatComposer(
                                 }
                             },
                             onClick = {
-                                onPlanChange(false)
+                                onPermissionModeChange(PermissionMode.DEFAULT)
                                 modeMenuOpen = false
                             },
+                            trailingIcon = if (permissionMode == PermissionMode.DEFAULT) {
+                                { Icon(Icons.Outlined.Check, contentDescription = null) }
+                            } else null,
                         )
-                        DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(stringResource(R.string.chat_mode_plan))
-                                    Text(
-                                        stringResource(R.string.chat_mode_plan_desc),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            },
-                            onClick = {
-                                onPlanChange(true)
-                                modeMenuOpen = false
-                            },
-                        )
+                        if (planModeEnabled) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(stringResource(R.string.chat_mode_plan))
+                                        Text(
+                                            stringResource(R.string.chat_mode_plan_desc),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    onPermissionModeChange(PermissionMode.PLAN)
+                                    modeMenuOpen = false
+                                },
+                                trailingIcon = if (permissionMode == PermissionMode.PLAN) {
+                                    { Icon(Icons.Outlined.Check, contentDescription = null) }
+                                } else null,
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.weight(1f))
@@ -3741,11 +3974,23 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
         return
     }
     if (state.selectedTask == null) {
-        var title by remember { mutableStateOf("") }
-        var goal by remember { mutableStateOf("") }
+        val projectId = state.selectedProject?.optString("id").orEmpty()
+        var title by remember(projectId) { mutableStateOf("") }
+        var goal by remember(projectId) { mutableStateOf("") }
         LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
-                SectionCard(stringResource(R.string.task_create_title)) {
+                SectionCard(
+                    title = stringResource(R.string.task_create_title),
+                    headerAction = {
+                        CurrentProjectSelector(
+                            projects = state.projects,
+                            selectedProject = state.selectedProject,
+                            enabled = !state.busy,
+                            onSelect = model::selectProject,
+                            showCurrentLabel = false,
+                        )
+                    },
+                ) {
                     OutlinedTextField(title, { title = it }, label = { Text(stringResource(R.string.task_title_label)) }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(goal, { goal = it }, label = { Text(stringResource(R.string.task_goal_label)) }, modifier = Modifier.fillMaxWidth(), minLines = 2)
                     Button(onClick = { model.createTask(title, goal); title = ""; goal = "" }, enabled = goal.isNotBlank()) {
@@ -3767,7 +4012,6 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
         val task = state.selectedTask
         val context = LocalContext.current
         var message by remember { mutableStateOf("") }
-        var answer by remember { mutableStateOf("") }
         var pendingAttachments by remember {
             mutableStateOf<List<PendingAttachment>>(emptyList())
         }
@@ -3779,7 +4023,7 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
                 .distinctBy { it.uri.toString() }
                 .take(5)
         }
-        val question = task?.optJSONObject("pending_question")
+        val question = parseApprovalQuestion(task?.optJSONObject("pending_question"))
         val running = task?.optString("status").orEmpty().equals("running", ignoreCase = true)
         Box(Modifier.fillMaxSize()) {
             LazyColumn(
@@ -3801,33 +4045,11 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
                 }
                 if (question != null) {
                     item {
-                        SectionCard(
-                            question.optString(
-                                "title",
-                                stringResource(R.string.task_waiting_answer),
-                            )
-                        ) {
-                            Text(question.optString("prompt", question.optString("question")))
-                            OutlinedTextField(
-                                answer,
-                                { answer = it },
-                                label = { Text(stringResource(R.string.task_answer_label)) },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Button(
-                                onClick = {
-                                    model.answerTask(
-                                        question.optString(
-                                            "id",
-                                            question.optString("questionId"),
-                                        ),
-                                        answer,
-                                    )
-                                    answer = ""
-                                },
-                                enabled = answer.isNotBlank(),
-                            ) { Text(stringResource(R.string.chat_submit_answer)) }
-                        }
+                        ApprovalQuestionCard(
+                            question = question,
+                            busy = state.busy,
+                            onAnswer = { model.answerTask(question.id, it) },
+                        )
                     }
                 }
                 item {
@@ -3921,8 +4143,12 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
             ChatComposer(
                 message = message,
                 onMessageChange = { message = it },
-                plan = false,
-                onPlanChange = {},
+                permissionMode = if (state.permissionMode == PermissionMode.AUTO) {
+                    PermissionMode.AUTO
+                } else {
+                    PermissionMode.DEFAULT
+                },
+                onPermissionModeChange = model::setPermissionMode,
                 running = running,
                 busy = state.busy,
                 attachments = pendingAttachments,
@@ -3944,7 +4170,7 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
                 onInterrupt = { model.taskAction("tasks.pause") },
                 placeholderRes = R.string.task_composer_placeholder,
                 runningPlaceholderRes = R.string.task_composer_running,
-                modeMenuEnabled = false,
+                planModeEnabled = false,
                 interruptWhileRunning = true,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -4444,8 +4670,24 @@ private fun SettingsScreen(
     var editorValue by remember { mutableStateOf("") }
     var editorError by remember { mutableStateOf(false) }
     val currentVersion = remember(context) { installedVersionName(context) }
-    LaunchedEffect(state.peer?.deviceId) {
+    LaunchedEffect(state.peer?.deviceId, pageId) {
         model.loadDesktopSettings()
+        if (pageId == "models") {
+            model.loadDesktopOpenAiOAuth()
+        }
+    }
+    LaunchedEffect(state.desktopOpenAiOAuthAuthUrl) {
+        val authUrl = state.desktopOpenAiOAuthAuthUrl
+        if (authUrl.isNullOrBlank()) return@LaunchedEffect
+        val uri = runCatching { Uri.parse(authUrl) }.getOrNull()
+        if (uri?.let { parsed ->
+                parsed.scheme in setOf("https", "http") && !parsed.host.isNullOrBlank()
+            } == true) {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+            }
+        }
+        model.clearDesktopOpenAiOAuthAuthUrl()
     }
 
     editingField?.let { field ->
@@ -4648,6 +4890,27 @@ private fun SettingsScreen(
                         }
                     }
                 }
+                item {
+                    SectionCard(stringResource(R.string.settings_permission_mode)) {
+                        ChoiceRow(
+                            stringResource(R.string.chat_mode_auto),
+                            state.permissionMode == PermissionMode.AUTO,
+                        ) { model.setPermissionMode(PermissionMode.AUTO) }
+                        ChoiceRow(
+                            stringResource(R.string.chat_mode_default),
+                            state.permissionMode == PermissionMode.DEFAULT,
+                        ) { model.setPermissionMode(PermissionMode.DEFAULT) }
+                        ChoiceRow(
+                            stringResource(R.string.chat_mode_plan),
+                            state.permissionMode == PermissionMode.PLAN,
+                        ) { model.setPermissionMode(PermissionMode.PLAN) }
+                        Text(
+                            stringResource(R.string.settings_permission_mode_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
         "about" -> AboutUpdateScreen(currentVersion)
@@ -4661,6 +4924,8 @@ private fun SettingsScreen(
                         ModelSettingsCard(
                             models = models,
                             busy = state.busy,
+                            oauth = state.desktopOpenAiOAuth,
+                            oauthBusy = state.desktopOpenAiOAuthLoading,
                             model = model,
                             showTitle = false,
                         )
@@ -5182,10 +5447,23 @@ private fun SettingsMenuRow(
 
 private data class ModelEditTarget(val role: String, val index: Int)
 
+private fun oauthModelId(candidate: JSONObject): String = candidate.optString("model")
+    .ifBlank { candidate.optString("id") }
+    .ifBlank { candidate.optString("slug") }
+    .trim()
+
+private fun oauthModelReasoning(candidate: JSONObject?): String = candidate
+    ?.optString("defaultReasoningEffort")
+    .orEmpty()
+    .ifBlank { candidate?.optString("default_reasoning_effort").orEmpty() }
+    .trim()
+
 @Composable
 private fun ModelSettingsCard(
     models: JSONObject,
     busy: Boolean,
+    oauth: JSONObject?,
+    oauthBusy: Boolean,
     model: MainViewModel,
     showTitle: Boolean = true,
 ) {
@@ -5193,6 +5471,30 @@ private fun ModelSettingsCard(
     val visionModels = models.optJSONArray("vision_models") ?: JSONArray()
     val codexModel = models.optJSONObject("codex_model")
     val secondaryModel = models.optJSONObject("secondary_model")
+    val oauthModels = jsonObjects(oauth?.optJSONArray("models"))
+    val oauthConnected = oauth?.optBoolean("connected") == true
+    val oauthAvailable = oauth?.optBoolean("available", true) != false
+    val oauthAccountLabel = oauth?.optJSONObject("account")?.let { account ->
+        account.optString("email")
+            .ifBlank { account.optString("planType") }
+            .ifBlank { account.optString("plan_type") }
+    }.orEmpty()
+    val selectedSavedOAuthModel = codexModel?.optString("model").orEmpty()
+    val selectedOAuthModel = oauthModels.firstOrNull {
+        oauthModelId(it) == selectedSavedOAuthModel
+    } ?: oauthModels.firstOrNull {
+        it.optBoolean("isDefault") || it.optBoolean("is_default")
+    } ?: oauthModels.firstOrNull()
+    var oauthSelection by remember(models.toString(), oauth?.toString()) {
+        mutableStateOf(selectedSavedOAuthModel.ifBlank { selectedOAuthModel?.let(::oauthModelId).orEmpty() })
+    }
+    var oauthReasoning by remember(models.toString(), oauth?.toString()) {
+        mutableStateOf(
+            codexModel?.optString("reasoning_effort").orEmpty().ifBlank {
+                oauthModelReasoning(selectedOAuthModel)
+            },
+        )
+    }
     var editTarget by remember { mutableStateOf<ModelEditTarget?>(null) }
 
     fun candidateFor(target: ModelEditTarget): JSONObject = when (target.role) {
@@ -5417,7 +5719,7 @@ private fun ModelSettingsCard(
         ChoiceRow(
             stringResource(R.string.settings_model_custom),
             models.optString("source", "custom") == "custom",
-            enabled = !busy,
+            enabled = !busy && !oauthBusy,
         ) {
             model.updateDesktopModels(
                 JSONObject(models.toString()).put("source", "custom"),
@@ -5426,15 +5728,153 @@ private fun ModelSettingsCard(
         if (codexModel != null) {
             ChoiceRow(
                 stringResource(R.string.settings_model_codex),
-                models.optString("source") == "codex",
-                enabled = !busy,
+                models.optString("source", "custom") == "codex",
+                enabled = !busy && !oauthBusy,
             ) {
                 model.updateDesktopModels(
                     JSONObject(models.toString()).put("source", "codex"),
                 )
             }
+        } else if (oauthAvailable) {
+            Text(
+                stringResource(R.string.settings_model_oauth_not_configured),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         HorizontalDivider(Modifier.padding(vertical = 3.dp))
+        Text(
+            stringResource(R.string.settings_model_openai_oauth_title),
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            if (oauthConnected && oauthAccountLabel.isNotBlank()) {
+                oauthAccountLabel
+            } else if (oauthConnected) {
+                stringResource(R.string.settings_model_oauth_connected)
+            } else {
+                stringResource(R.string.settings_model_oauth_hint)
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (!oauthConnected) {
+            OutlinedButton(
+                onClick = model::startDesktopOpenAiOAuthLogin,
+                enabled = !busy && !oauthBusy && oauthAvailable,
+            ) {
+                if (oauthBusy) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(stringResource(R.string.settings_model_oauth_login))
+                }
+            }
+            oauth?.optString("error")?.takeIf(String::isNotBlank)?.let { message ->
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        } else if (oauthModels.isNotEmpty()) {
+            val selected = oauthModels.firstOrNull { oauthModelId(it) == oauthSelection }
+            val effortOptions = buildList {
+                selected?.optJSONArray("supportedReasoningEfforts")?.let { values ->
+                    (0 until values.length()).forEach { index ->
+                        values.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                    }
+                }
+                selected?.optJSONArray("supported_reasoning_efforts")?.let { values ->
+                    (0 until values.length()).forEach { index ->
+                        values.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                    }
+                }
+                oauthReasoning.takeIf(String::isNotBlank)?.let(::add)
+                selected?.let(::oauthModelReasoning)?.takeIf(String::isNotBlank)?.let(::add)
+            }.distinct()
+            val effectiveOAuthReasoning = oauthReasoning.ifBlank { effortOptions.firstOrNull().orEmpty() }
+            if (selected != null) {
+                Text(
+                    stringResource(R.string.settings_model_oauth_model),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Box {
+                    var menuExpanded by remember { mutableStateOf(false) }
+                    OutlinedTextField(
+                        value = selected.optString("displayName")
+                            .ifBlank { selected.optString("display_name") }
+                            .ifBlank { oauthSelection },
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !busy && !oauthBusy) { menuExpanded = true },
+                        trailingIcon = { Text("▾") },
+                    )
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                    ) {
+                        oauthModels.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        option.optString("displayName")
+                                            .ifBlank { option.optString("display_name") }
+                                            .ifBlank { oauthModelId(option) },
+                                    )
+                                },
+                                onClick = {
+                                    oauthSelection = oauthModelId(option)
+                                    oauthReasoning = oauthModelReasoning(option)
+                                    menuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+                if (effortOptions.isNotEmpty()) {
+                    Text(
+                        stringResource(R.string.settings_model_reasoning),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    if (effortOptions.size > 1) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            effortOptions.forEach { effort ->
+                                FilterChip(
+                                    selected = effectiveOAuthReasoning == effort,
+                                    onClick = { oauthReasoning = effort },
+                                    label = { Text(effort) },
+                                    enabled = !busy && !oauthBusy,
+                                )
+                            }
+                        }
+                    }
+                }
+                Button(
+                    onClick = {
+                        val candidate = JSONObject()
+                            .put("id", "codex-$oauthSelection")
+                            .put("name", oauthSelection)
+                            .put("model", oauthSelection)
+                            .put("provider", "codex_oauth")
+                            .put("base_url", "codex://oauth")
+                            .put("reasoning_effort", effectiveOAuthReasoning)
+                            .put("description", "OpenAI OAuth")
+                        model.updateDesktopModels(
+                            JSONObject(models.toString())
+                                .put("codex_model", candidate)
+                                .put("source", "codex"),
+                        )
+                    },
+                    enabled = oauthSelection.isNotBlank() && !busy && !oauthBusy,
+                ) { Text(stringResource(R.string.settings_model_oauth_use)) }
+                OutlinedButton(
+                    onClick = model::logoutDesktopOpenAiOAuth,
+                    enabled = !busy && !oauthBusy,
+                ) { Text(stringResource(R.string.settings_model_oauth_logout)) }
+            }
+        }
         Text(
             stringResource(R.string.settings_model_primary_and_fallbacks),
             fontWeight = FontWeight.Medium,
@@ -5643,11 +6083,25 @@ private fun HeroCard(title: String, subtitle: String, badge: String) {
 }
 
 @Composable
-private fun SectionCard(title: String?, content: @Composable ColumnScope.() -> Unit) {
+private fun SectionCard(
+    title: String?,
+    headerAction: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     Card(shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             if (title != null) {
-                Text(title, fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        title,
+                        modifier = if (headerAction != null) Modifier.weight(1f) else Modifier,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    headerAction?.invoke()
+                }
             }
             content()
         }

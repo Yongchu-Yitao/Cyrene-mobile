@@ -11,6 +11,7 @@
     <string name="menu_open">Open navigation menu</string>
     <string name="menu_recent_sessions">All sessions</string>
     <string name="menu_no_recent_sessions">No recent tasks or chats</string>
+    <string name="menu_project_session_summary">%1$s · %2$s</string>
     <string name="menu_chat_summary">Chat · %1$d messages · %2$s</string>
     <string name="menu_task_summary">Task · %1$s</string>
     <string name="chat_menu_rename">Rename</string>
@@ -122,6 +123,8 @@
     <string name="projects_description">The desktop remains the source of truth.</string>
     <string name="projects_empty">No projects have been authorized for this device.</string>
     <string name="project_unnamed">Untitled project</string>
+    <string name="project_select">Select project</string>
+    <string name="project_choose">Choose project</string>
     <string name="project_current">Current</string>
     <string name="project_select_first">Select an authorized project in Projects first.</string>
 
@@ -131,6 +134,7 @@
     <string name="chat_new">New chat</string>
     <string name="chat_welcome_title">Start a new conversation</string>
     <string name="chat_welcome_description">Chats are linked to the current workspace, so the Agent can read project context.</string>
+    <string name="chat_current_project">Current project: %1$s</string>
     <string name="drawer_new_chat_label">Chat</string>
     <string name="chats_empty">There are no chats in this project yet.</string>
     <string name="chat_unnamed">Untitled chat</string>
@@ -154,12 +158,18 @@
     <string name="chat_message_send_failed">Couldn’t send</string>
     <string name="chat_run_failed">Agent reply failed</string>
     <string name="chat_composer_desktop">Message Cyrene…</string>
+    <string name="chat_mode_auto">Auto</string>
+    <string name="chat_mode_auto_desc">Review permission requests automatically</string>
     <string name="chat_mode_default">Default</string>
-    <string name="chat_mode_default_desc">Ask Cyrene to complete the task directly</string>
+    <string name="chat_mode_default_desc">Ask before sensitive operations</string>
     <string name="chat_mode_plan">Plan</string>
     <string name="chat_mode_plan_desc">Create a plan before making changes</string>
     <string name="chat_add_attachment">Add attachment</string>
     <string name="chat_remove_attachment">Remove attachment</string>
+    <string name="approval_permission_title">Authorization needed</string>
+    <string name="approval_confirmation_title">Confirmation needed</string>
+    <string name="approval_prompt_fallback">Cyrene needs your confirmation to continue.</string>
+    <string name="approval_custom_answer">Or enter a custom reply</string>
     <string name="error_attachment_read">Could not read attachment: %1$s</string>
     <string name="error_attachment_too_large">Attachment is larger than 8 MB: %1$s</string>
     <string name="error_attachments_too_large">Attachments exceed the 8 MB total limit</string>
@@ -209,8 +219,10 @@
     <string name="settings_title">Settings</string>
     <string name="settings_mobile_section">Android app</string>
     <string name="settings_mobile_description">These preferences only affect this phone.</string>
-    <string name="settings_mobile_menu_title">Appearance and language</string>
-    <string name="settings_mobile_menu_description">Theme and display language for this phone.</string>
+    <string name="settings_mobile_menu_title">App preferences</string>
+    <string name="settings_mobile_menu_description">Theme, language, and default permission mode for this phone.</string>
+    <string name="settings_permission_mode">Default permission mode</string>
+    <string name="settings_permission_mode_description">Auto is enabled by default. Chats support all three modes; task runs support Auto and Default. You can also switch modes in the composer.</string>
     <string name="settings_update_title">About and updates</string>
     <string name="settings_update_description">Version %1$s · GitHub update channel</string>
     <string name="settings_about_title">About</string>
@@ -283,6 +295,14 @@
     <string name="settings_model_source">Primary model source</string>
     <string name="settings_model_custom">Custom models</string>
     <string name="settings_model_codex">OpenAI Codex</string>
+    <string name="settings_model_oauth_not_configured">OpenAI OAuth is not configured yet. Sign in below to discover available Codex models.</string>
+    <string name="settings_model_openai_oauth_title">OpenAI OAuth</string>
+    <string name="settings_model_oauth_connected">OpenAI account connected</string>
+    <string name="settings_model_oauth_hint">Sign in on the desktop through OpenAI. The OAuth token stays on the desktop.</string>
+    <string name="settings_model_oauth_login">Sign in with OpenAI</string>
+    <string name="settings_model_oauth_logout">Sign out</string>
+    <string name="settings_model_oauth_model">Codex model</string>
+    <string name="settings_model_oauth_use">Use this model as primary</string>
     <string name="settings_model_primary_and_fallbacks">Primary model and fallbacks</string>
     <string name="settings_model_primary">Primary model</string>
     <string name="settings_model_fallback">Fallback model</string>
