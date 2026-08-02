@@ -13,7 +13,6 @@ import java.io.BufferedWriter
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.net.Inet4Address
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -54,11 +53,12 @@ class QemuVirtualMachine(
         if (socketPath.exists()) socketPath.delete()
         val libraryPath = File(context.applicationInfo.nativeLibraryDir, "libqemu-system-x86_64.so")
         val libraryLocation = libraryPath.takeIf(File::isFile)?.absolutePath ?: libraryPath.name
-        val upstreamDns = upstreamDnsAddress()
+        val upstreamDns = upstreamDnsAddresses()
         File(bundle.directory, "etc/resolv.conf").apply {
             parentFile?.mkdirs()
-            writeText("nameserver $upstreamDns\n")
+            writeText(upstreamDns.joinToString(separator = "\n", postfix = "\n") { "nameserver $it" })
         }
+        Log.i(SERIAL_TAG, "QEMU slirp upstream DNS: ${upstreamDns.joinToString()}")
         val parameters = arrayOf(
             "libqemu-system-x86_64.so",
             "-machine", "pc",
@@ -75,10 +75,13 @@ class QemuVirtualMachine(
             "-serial", "chardev:cyrene",
             "-drive", "if=none,id=rootfs,file=${rootfsDisk.absolutePath},format=raw,cache=writeback",
             "-device", "virtio-blk-pci,drive=rootfs",
-            // Limbo's Android libc shim cannot read Android's /etc/resolv.conf,
-            // so give slirp the active Android network's upstream resolver. The
-            // guest still uses QEMU's DNS proxy at 10.0.2.3.
-            "-netdev", "user,id=net0,restrict=off,dns=$upstreamDns",
+            // The guest uses QEMU's DNS proxy at 10.0.2.3. Limbo redirects
+            // slirp's host /etc/resolv.conf read into bundle.directory, where
+            // the active Android network's upstream resolvers were written
+            // above. Do not pass dns=<upstream>: that option changes the
+            // *guest-visible proxy address* and would make 10.0.2.3 stop
+            // answering whenever a real phone reports a different resolver.
+            "-netdev", "user,id=net0,restrict=off",
             "-device", "virtio-net-pci,netdev=net0",
             "-no-reboot",
             "-overcommit", "mem-lock=off",
@@ -212,14 +215,17 @@ class QemuVirtualMachine(
 
     private fun token(): String = UUID.randomUUID().toString().replace("-", "")
 
-    private fun upstreamDnsAddress(): String {
+    private fun upstreamDnsAddresses(): List<String> {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         return runCatching {
             connectivity.getLinkProperties(connectivity.activeNetwork)
                 ?.dnsServers
-                ?.firstOrNull { it is Inet4Address }
-                ?.hostAddress
-        }.getOrNull() ?: "1.1.1.1"
+                ?.mapNotNull { it.hostAddress?.substringBefore('%') }
+                ?.filter(String::isNotBlank)
+                ?.distinct()
+                ?.take(3)
+                ?.takeIf { it.isNotEmpty() }
+        }.getOrNull() ?: listOf("1.1.1.1")
     }
 
     companion object {

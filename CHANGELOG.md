@@ -2,6 +2,23 @@
 
 本文记录 Cyrene Mobile 的重要变更。
 
+## 0.2.4 — 2026-08-03
+
+### Linux 虚拟机 DNS
+
+- 修复真实手机上 Linux 虚拟机能够获取地址和默认路由、但 DNS 解析失败的问题。此前 QEMU
+  将 Android 上游 DNS 错误设置成了 Guest 可见的 DNS 代理地址，而 Alpine 始终查询
+  `10.0.2.3`；两者仅在模拟器中碰巧一致。
+- Guest 继续固定使用 QEMU DNS 代理 `10.0.2.3`，slirp 则从 Android 当前网络读取实际
+  上游 DNS；同时支持多个 IPv4/IPv6 DNS，并去除 IPv6 接口作用域后再写入解析器配置。
+- 在 API 35 ARM64 模拟器的真实 QEMU Alpine Guest 中验证 DHCP、DNS、HTTPS 和
+  `apk update`，软件仓库成功返回 28,646 个可用包。
+
+### 版本
+
+- 主 App 版本为 `0.2.4`（versionCode 7），Runtime 版本为 `0.2.4`
+  （versionCode 5）。DNS 修复位于 Runtime APK，两个 APK 仍从同一 Release 安装。
+
 ## 0.2.3 — 2026-08-03
 
 ### ColorOS Runtime 启动兼容
