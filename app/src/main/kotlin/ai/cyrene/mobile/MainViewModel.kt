@@ -1,6 +1,7 @@
 package ai.cyrene.mobile
 
 import android.app.Application
+import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,10 +9,16 @@ import ai.cyrene.mobile.data.CachedProjectData
 import ai.cyrene.mobile.data.DesktopDataCache
 import ai.cyrene.mobile.data.DesktopDataSnapshot
 import ai.cyrene.mobile.data.SecureStore
+import ai.cyrene.mobile.data.MobileOpenAiOAuthClient
 import ai.cyrene.mobile.localagent.database.LocalAgentDatabase
 import ai.cyrene.mobile.localagent.database.LocalSessionEntity
 import ai.cyrene.mobile.localagent.model.RunState
+import ai.cyrene.mobile.localagent.runtime.LocalAgentAttachment
+import ai.cyrene.mobile.localagent.runtime.MAX_LOCAL_ATTACHMENTS
+import ai.cyrene.mobile.localagent.runtime.MAX_LOCAL_ATTACHMENT_BYTES
 import ai.cyrene.mobile.localagent.runtime.RunSnapshot
+import ai.cyrene.mobile.localagent.runtime.RuntimeCompanionClient
+import ai.cyrene.mobile.runtime.protocol.GuestOperation
 import ai.cyrene.mobile.localagent.service.LocalAgentForegroundService
 import ai.cyrene.mobile.localagent.service.LocalRunSupervisor
 import ai.cyrene.mobile.network.CyreneClient
@@ -36,6 +43,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
 import java.util.UUID
@@ -93,12 +101,19 @@ data class MobileUiState(
     val desktopOpenAiOAuth: JSONObject? = null,
     val desktopOpenAiOAuthLoading: Boolean = false,
     val desktopOpenAiOAuthAuthUrl: String? = null,
+    val desktopOpenAiOAuthUserCode: String? = null,
+    val localChangedFiles: List<JSONObject> = emptyList(),
+    val localChangedFilesLoading: Boolean = false,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SecureStore(application)
+    private val mobileOpenAiOAuth = MobileOpenAiOAuthClient(store)
     private val desktopDataCache = DesktopDataCache(application)
     private val localAgentDao = LocalAgentDatabase.open(application).dao()
+    // Keep the Runtime service bound for the ViewModel lifetime. A one-shot binding would
+    // destroy the service after every file query and tear down the shared native QEMU VM.
+    private val localRuntime = RuntimeCompanionClient(application)
     private val identity = store.identity()
     private val client = CyreneClient(
         identity,
@@ -141,6 +156,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state = _state.asStateFlow()
     private var terminalPollJob: Job? = null
     private var openAiOAuthPollJob: Job? = null
+
+    fun loadLocalChangedFiles() {
+        val sessionId = _state.value.selectedChat?.optString("id").orEmpty()
+        if (!sessionId.startsWith("ls_") || _state.value.localChangedFilesLoading) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(localChangedFilesLoading = true)
+            runCatching {
+                val paths = linkedSetOf<String>()
+                localAgentDao.traces(sessionId, 500).asReversed().forEach { trace ->
+                    if (trace.type != "tool_result") return@forEach
+                    val result = JSONObject(trace.payloadJson)
+                    if (result.optString("status") != "success") return@forEach
+                    val payload = result.optString("inline_payload").takeIf(String::isNotBlank)
+                        ?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return@forEach
+                    payload.optJSONObject("published_file")?.optString("path")
+                        ?.takeIf(String::isNotBlank)?.let(paths::add)
+                }
+                localRuntime.run {
+                    submit(sessionId, GuestOperation.SESSION_MOUNT, timeoutMs = 120_000)
+                    paths.mapNotNull { path ->
+                        val response = submit(
+                            sessionId, GuestOperation.FS_STAT,
+                            JSONObject().put("path", path), timeoutMs = 30_000,
+                        )
+                        response.payload.takeIf {
+                            response.status == "success" && it.optBoolean("is_file")
+                        }?.let { JSONObject().put("path", path).put("size", it.optLong("size")) }
+                    }
+                }
+            }.onSuccess { files ->
+                _state.value = _state.value.copy(
+                    localChangedFiles = files,
+                    localChangedFilesLoading = false,
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    localChangedFilesLoading = false,
+                    error = error.message ?: text(R.string.local_files_load_failed),
+                )
+            }
+        }
+    }
+
+    fun exportLocalChangedFile(path: String, destination: Uri) {
+        val sessionId = _state.value.selectedChat?.optString("id").orEmpty()
+        if (!sessionId.startsWith("ls_") || path.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                getApplication<Application>().contentResolver.openOutputStream(destination, "w")
+                    ?.use { output ->
+                        localRuntime.run {
+                            submit(sessionId, GuestOperation.SESSION_MOUNT, timeoutMs = 120_000)
+                            var offset = 0L
+                            do {
+                                val response = submit(
+                                    sessionId, GuestOperation.ARTIFACT_EXPORT,
+                                    JSONObject().put("path", path).put("offset", offset)
+                                        .put("limit", 256 * 1024),
+                                    timeoutMs = 30_000,
+                                )
+                                check(response.status == "success") {
+                                    response.message ?: "Artifact export failed"
+                                }
+                                val bytes = Base64.getDecoder().decode(
+                                    response.payload.getString("content_base64")
+                                )
+                                output.write(bytes)
+                                offset += bytes.size
+                                val complete = response.payload.optBoolean("complete")
+                                check(bytes.isNotEmpty() || complete) { "Artifact export made no progress" }
+                            } while (!complete)
+                        }
+                    } ?: error("Unable to open destination")
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    error = error.message ?: text(R.string.local_file_export_failed)
+                )
+            }
+        }
+    }
     private var terminalProjectId = ""
     private var terminalCursor = 0
     private var terminalCommandSent = false
@@ -225,6 +320,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .put("id", message.messageId)
                 .put("role", message.role)
                 .put("content", message.content)
+                .put("attachments", JSONArray(message.attachmentsJson))
                 .put("createdAt", epochMillisAsIso(message.createdAt.toLongOrNull() ?: 0L))
                 .put("timelineEpochMs", message.createdAt.toLongOrNull() ?: 0L)
         }.toMutableList()
@@ -624,7 +720,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-    fun updateDesktopModels(models: JSONObject) =
+    fun updateLocalModels(models: JSONObject) =
         launchBusy(text(R.string.status_saving_models)) {
             val localModels = mergeLocalModelSecrets(models, store.localModelConfiguration())
             store.saveLocalModelConfiguration(localModels)
@@ -632,31 +728,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 desktopModels = store.localModelConfigurationPublic(),
                 status = text(R.string.status_local_models_saved),
             )
-            val peer = _state.value.peer ?: return@launchBusy
-            val result = client.command(
-                peer,
-                "settings.update",
-                payload = JSONObject().put("models", localModels),
-            )
-            _state.value = _state.value.copy(
-                desktopSettings = result.optJSONObject("settings")
-                    ?: _state.value.desktopSettings,
-                desktopSettingsSchema = result.optJSONObject("schema")
-                    ?: _state.value.desktopSettingsSchema,
-                desktopModels = store.localModelConfigurationPublic()
-                    ?: result.optJSONObject("models")
-                    ?: _state.value.desktopModels,
-                status = text(R.string.status_models_saved),
-            )
         }
 
     fun loadDesktopOpenAiOAuth() {
         if (_state.value.desktopOpenAiOAuthLoading) return
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = _state.value.copy(desktopOpenAiOAuthLoading = true)
-            runCatching {
-                client.command(requirePeer(), "settings.openai_oauth.read")
-            }.onSuccess { result ->
+            runCatching { mobileOpenAiOAuth.status() }.onSuccess { result ->
                 _state.value = _state.value.copy(desktopOpenAiOAuth = result)
             }.onFailure { error ->
                 _state.value = _state.value.copy(
@@ -677,41 +755,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = _state.value.copy(
                 desktopOpenAiOAuthLoading = true,
                 desktopOpenAiOAuthAuthUrl = null,
+                desktopOpenAiOAuthUserCode = null,
                 error = null,
             )
-            runCatching {
-                client.command(requirePeer(), "settings.openai_oauth.login")
-            }.onFailure { error ->
+            runCatching { mobileOpenAiOAuth.requestDeviceCode() }.onFailure { error ->
                 _state.value = _state.value.copy(
                     desktopOpenAiOAuthLoading = false,
                     error = error.message ?: text(R.string.error_generic),
                     status = text(R.string.status_need_attention),
                 )
-            }.onSuccess { result ->
-                val authUrl = result.optString("authUrl")
-                    .ifBlank { result.optString("auth_url") }
-                    .ifBlank { result.optString("url") }
+            }.onSuccess { deviceCode ->
                 _state.value = _state.value.copy(
-                    desktopOpenAiOAuthAuthUrl = authUrl.ifBlank { null },
+                    desktopOpenAiOAuthAuthUrl = deviceCode.verificationUrl,
+                    desktopOpenAiOAuthUserCode = deviceCode.userCode,
                 )
-
-                var attempts = 0
-                while (isActive && attempts < 40) {
-                    delay(1_500)
-                    attempts += 1
-                    val snapshot = runCatching {
-                        client.command(requirePeer(), "settings.openai_oauth.read")
-                    }.getOrNull() ?: continue
+                runCatching { mobileOpenAiOAuth.completeDeviceCode(deviceCode) }
+                    .onSuccess { snapshot ->
                     _state.value = _state.value.copy(desktopOpenAiOAuth = snapshot)
-                    if (snapshot.optBoolean("connected")) break
-                }
-                _state.value = _state.value.copy(desktopOpenAiOAuthLoading = false)
+                    }.onFailure { error ->
+                        if (error !is CancellationException) {
+                            _state.value = _state.value.copy(error = error.message ?: text(R.string.error_generic))
+                        }
+                    }
+                _state.value = _state.value.copy(
+                    desktopOpenAiOAuthLoading = false,
+                    desktopOpenAiOAuthUserCode = null,
+                )
             }
         }
     }
 
     fun clearDesktopOpenAiOAuthAuthUrl() {
         _state.value = _state.value.copy(desktopOpenAiOAuthAuthUrl = null)
+    }
+
+    fun cancelMobileOpenAiOAuthLogin() {
+        openAiOAuthPollJob?.cancel()
+        openAiOAuthPollJob = null
+        _state.value = _state.value.copy(
+            desktopOpenAiOAuthLoading = false,
+            desktopOpenAiOAuthAuthUrl = null,
+            desktopOpenAiOAuthUserCode = null,
+        )
     }
 
     fun logoutDesktopOpenAiOAuth() {
@@ -722,8 +807,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 error = null,
             )
             runCatching {
-                client.command(requirePeer(), "settings.openai_oauth.logout")
-                client.command(requirePeer(), "settings.openai_oauth.read")
+                mobileOpenAiOAuth.logout()
+                mobileOpenAiOAuth.status(includeModels = false)
             }.onSuccess { result ->
                 _state.value = _state.value.copy(desktopOpenAiOAuth = result)
             }.onFailure { error ->
@@ -738,6 +823,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissError() {
         _state.value = _state.value.copy(error = null)
+    }
+
+    fun showLocalPermissionModeUnsupported() {
+        _state.value = _state.value.copy(
+            error = text(R.string.local_agent_permission_mode_unsupported),
+        )
     }
 
     fun refreshProjects() = launchBusy(text(R.string.status_syncing_projects)) {
@@ -916,7 +1007,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): Boolean {
         if (_state.value.creatingChat) return false
         val content = message.trim()
-        if (content.isBlank()) return false
+        if (content.isBlank() && attachments.isEmpty()) return false
         val projectId = _state.value.selectedProject?.optString("id").orEmpty()
         if (projectId.isBlank()) return false
         if (projectId == LOCAL_PROJECT_ID) {
@@ -977,10 +1068,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         content: String,
         attachments: List<PendingAttachment>,
     ): Boolean {
-        if (attachments.isNotEmpty()) {
-            _state.value = _state.value.copy(error = text(R.string.local_agent_attachments_unsupported))
-            return false
-        }
         if (!store.hasRunnableLocalModel()) {
             _state.value = _state.value.copy(error = text(R.string.local_agent_model_required))
             return false
@@ -995,6 +1082,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val sessionId = "ls_${UUID.randomUUID().toString().replace("-", "")}"
                 val title = content.lineSequence().firstOrNull()
                     ?.trim()?.take(40).orEmpty()
+                    .ifBlank { attachments.firstOrNull()?.name?.take(40).orEmpty() }
                     .ifBlank { text(R.string.local_agent_default_title) }
                 localAgentDao.putSession(
                     LocalSessionEntity(
@@ -1006,18 +1094,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loadLocalProject(resetSelection = true)
                 loadLocalChat(sessionId, clearEvents = true)
                 val runId = "run_${UUID.randomUUID().toString().replace("-", "")}"
-                updateLocalUserMessage(
-                    chatId = sessionId,
-                    messageId = "pending_$runId",
-                    content = content,
-                    deliveryState = "sending",
-                )
+                val localAttachments = persistLocalAttachments(sessionId, runId, attachments)
+                localAgentDao.saveMessage(sessionId, "user", content, localAttachments.toString())
+                loadLocalChat(sessionId, clearEvents = false)
                 _state.value = _state.value.copy(
                     activeRunId = runId,
                     status = text(R.string.status_agent_running),
                 )
                 LocalAgentForegroundService.startRun(
                     getApplication(), runId, title, sessionId, 1L, content,
+                    localAttachments.toString(),
                 )
                 observeLocalChat(sessionId)
             }.onFailure { error ->
@@ -1037,11 +1123,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         content: String,
         attachments: List<PendingAttachment>,
     ) {
-        if (content.isBlank()) return
-        if (attachments.isNotEmpty()) {
-            _state.value = _state.value.copy(error = text(R.string.local_agent_attachments_unsupported))
-            return
-        }
+        if (content.isBlank() && attachments.isEmpty()) return
         if (!store.hasRunnableLocalModel()) {
             _state.value = _state.value.copy(error = text(R.string.local_agent_model_required))
             return
@@ -1049,22 +1131,104 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.activeRunId != null) return
         val sessionId = chat.optString("id")
         val runId = "run_${UUID.randomUUID().toString().replace("-", "")}"
-        updateLocalUserMessage(
-            chatId = sessionId,
-            messageId = "pending_$runId",
-            content = content,
-            deliveryState = "sending",
-        )
         _state.value = _state.value.copy(
             activeRunId = runId,
             runEvents = emptyList(),
             error = null,
             status = text(R.string.status_agent_running),
         )
-        LocalAgentForegroundService.startRun(
-            getApplication(), runId, chat.optString("title"), sessionId, 1L, content,
-        )
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val localAttachments = persistLocalAttachments(sessionId, runId, attachments)
+                localAgentDao.saveMessage(sessionId, "user", content, localAttachments.toString())
+                loadLocalChat(sessionId, clearEvents = false)
+                LocalAgentForegroundService.startRun(
+                    getApplication(), runId, chat.optString("title"), sessionId, 1L, content,
+                    localAttachments.toString(),
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    activeRunId = null,
+                    error = error.message ?: text(R.string.local_agent_unavailable),
+                    status = text(R.string.status_need_attention),
+                )
+            }
+        }
         observeLocalChat(sessionId)
+    }
+
+    private fun persistLocalAttachments(
+        sessionId: String,
+        runId: String,
+        attachments: List<PendingAttachment>,
+    ): JSONArray {
+        require(attachments.size <= MAX_LOCAL_ATTACHMENTS) {
+            text(R.string.local_agent_attachments_too_large)
+        }
+        if (attachments.isEmpty()) return JSONArray()
+        val root = File(
+            getApplication<Application>().filesDir,
+            "local-agent-attachments",
+        ).canonicalFile
+        val directory = File(File(root, sessionId), runId).apply { mkdirs() }.canonicalFile
+        require(directory.path.startsWith(root.path + File.separator)) {
+            text(R.string.error_attachment_read, "")
+        }
+        var totalBytes = 0L
+        val result = JSONArray()
+        attachments.forEachIndexed { index, attachment ->
+            val safeName = attachment.name
+                .replace(Regex("""[\\/:*?"<>|\u0000-\u001f]"""), "_")
+                .take(160)
+                .ifBlank { "attachment-$index" }
+            val storedName = "%02d-%s".format(index + 1, safeName)
+            val target = File(directory, storedName).canonicalFile
+            require(target.parentFile == directory) { text(R.string.error_attachment_read, safeName) }
+            val part = File(directory, ".$storedName.part")
+            val digest = MessageDigest.getInstance("SHA-256")
+            var fileBytes = 0L
+            val input = getApplication<Application>().contentResolver
+                .openInputStream(attachment.uri)
+                ?: throw IllegalStateException(text(R.string.error_attachment_read, safeName))
+            input.use { source ->
+                FileOutputStream(part, false).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        fileBytes += count
+                        totalBytes += count
+                        require(fileBytes <= MAX_LOCAL_ATTACHMENT_BYTES) {
+                            text(R.string.local_agent_attachment_too_large, safeName)
+                        }
+                        require(totalBytes <= MAX_LOCAL_ATTACHMENT_BYTES) {
+                            text(R.string.local_agent_attachments_too_large)
+                        }
+                        output.write(buffer, 0, count)
+                        digest.update(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+            if (target.exists()) target.delete()
+            require(part.renameTo(target)) { text(R.string.error_publish_download) }
+            val id = "la_${UUID.randomUUID().toString().replace("-", "")}"
+            result.put(
+                LocalAgentAttachment(
+                    id = id,
+                    name = attachment.name.take(240),
+                    contentType = getApplication<Application>().contentResolver
+                        .getType(attachment.uri) ?: "application/octet-stream",
+                    size = fileBytes,
+                    sha256 = digest.digest().joinToString("") {
+                        "%02x".format(it.toInt() and 0xff)
+                    },
+                    localPath = target.absolutePath,
+                    workspacePath = "attachments/$runId/$storedName",
+                ).toJson(),
+            )
+        }
+        return result
     }
 
     fun renameChat(project: JSONObject, chat: JSONObject, requestedTitle: String) {
@@ -1386,6 +1550,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         messageId: String,
         content: String,
         deliveryState: String,
+        attachments: JSONArray = JSONArray(),
     ) {
         val current = _state.value.selectedChat ?: return
         if (current.optString("id") != chatId) return
@@ -1398,6 +1563,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .put("id", messageId)
                 .put("role", "user")
                 .put("content", content)
+                .put("attachments", attachments)
                 .put("createdAt", Instant.now().toString())
                 .put("deliveryState", deliveryState),
         )
@@ -1723,7 +1889,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-    fun previewChatAttachment(file: JSONObject) =
+    fun previewChatAttachment(file: JSONObject) {
+        localAttachmentFile(file)?.let { attachment ->
+            _state.value = _state.value.copy(
+                viewerFile = file,
+                viewerFilePath = attachment.absolutePath,
+                viewerMimeType = file.optString("content_type"),
+                viewerLoading = false,
+            )
+            return
+        }
         projectCommand(text(R.string.status_loading_preview)) { peer, projectId ->
             val chatId = requireNotNull(_state.value.selectedChat).getString("id")
             val attachmentId = file.getString("id")
@@ -1784,6 +1959,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(viewerLoading = false)
             }
         }
+    }
 
     fun loadInlineChatImage(file: JSONObject) = loadChatImage(file, thumbnail = true)
 
@@ -1791,10 +1967,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadChatImage(file: JSONObject, thumbnail: Boolean) {
         val attachmentId = file.optString("id")
-        val peer = _state.value.peer ?: return
         val projectId = _state.value.selectedProject?.optString("id").orEmpty()
         val chatId = _state.value.selectedChat?.optString("id").orEmpty()
         val cacheKey = "$chatId::$attachmentId"
+        localAttachmentFile(file)?.let { attachment ->
+            _state.value = if (thumbnail) {
+                _state.value.copy(
+                    inlineAttachmentPaths =
+                        _state.value.inlineAttachmentPaths + (cacheKey to attachment.absolutePath),
+                    inlineAttachmentErrors = _state.value.inlineAttachmentErrors - cacheKey,
+                )
+            } else {
+                _state.value.copy(
+                    fullImagePaths =
+                        _state.value.fullImagePaths + (cacheKey to attachment.absolutePath),
+                    fullImageErrors = _state.value.fullImageErrors - cacheKey,
+                )
+            }
+            return
+        }
+        val peer = _state.value.peer ?: return
         val paths = if (thumbnail) {
             _state.value.inlineAttachmentPaths
         } else {
@@ -1892,6 +2084,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+        }
+    }
+
+    private fun localAttachmentFile(file: JSONObject): File? {
+        val rawPath = file.optString("local_path")
+        if (rawPath.isBlank()) return null
+        val root = File(
+            getApplication<Application>().filesDir,
+            "local-agent-attachments",
+        ).canonicalFile
+        val candidate = runCatching { File(rawPath).canonicalFile }.getOrNull() ?: return null
+        return candidate.takeIf {
+            it.isFile && it.path.startsWith(root.path + File.separator) &&
+                (file.optLong("size", -1L) < 0L || it.length() == file.optLong("size"))
         }
     }
 
@@ -2623,6 +2829,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backgroundSyncJob?.cancel()
         terminalPollJob?.cancel()
         openAiOAuthPollJob?.cancel()
+        localRuntime.close()
         client.close()
         super.onCleared()
     }

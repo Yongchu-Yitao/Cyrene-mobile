@@ -8,7 +8,8 @@ const val MAX_GUEST_MESSAGE_BYTES = 1_048_576
 enum class GuestOperation(val wireName: String) {
     HELLO("hello"), SESSION_MOUNT("session_mount"), SESSION_UNMOUNT("session_unmount"),
     EXEC_START("exec_start"), EXEC_STDIN("exec_stdin"), EXEC_SIGNAL("exec_signal"), EXEC_WAIT("exec_wait"),
-    FS_STAT("fs_stat"), FS_LIST("fs_list"), FS_READ("fs_read"), FS_WRITE("fs_write"), FS_PATCH("fs_patch"),
+    FS_STAT("fs_stat"), FS_LIST("fs_list"), FS_READ("fs_read"), FS_WRITE("fs_write"),
+    FS_WRITE_CHUNK("fs_write_chunk"), FS_PATCH("fs_patch"),
     FS_GLOB("fs_glob"), FS_GREP("fs_grep"), ARTIFACT_EXPORT("artifact_export"),
     RESOURCE_USAGE("resource_usage"), HEALTH_CHECK("health_check"), SHUTDOWN("shutdown");
 

@@ -159,6 +159,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
@@ -396,11 +397,19 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
     var renameChatTarget by remember { mutableStateOf<RecentSession?>(null) }
     var deleteChatTarget by remember { mutableStateOf<RecentSession?>(null) }
     var renameChatTitle by remember { mutableStateOf("") }
+    var pendingLocalExportPath by remember { mutableStateOf<String?>(null) }
+    val localFileExporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { destination ->
+        val path = pendingLocalExportPath
+        pendingLocalExportPath = null
+        if (destination != null && path != null) model.exportLocalChangedFile(path, destination)
+    }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val localChatSelected = tab == 2 && state.selectedChat?.optBoolean("local") == true
     val rightPanelAvailable =
-        (tab == 2 && state.selectedChat != null &&
-            state.selectedProject?.optString("id") != LOCAL_PROJECT_ID) ||
+        (tab == 2 && state.selectedChat != null) ||
             (tab == 3 && state.selectedTask != null)
     var rightPanelOpen by remember { mutableStateOf(false) }
     var rightPanelDragging by remember { mutableStateOf(false) }
@@ -427,8 +436,25 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
         rightPanelRevealPx = 0f
         suppressLeftDrawerGestures = false
     }
+    LaunchedEffect(rightPanelOpen, localChatSelected, state.selectedChat?.optString("id")) {
+        if (rightPanelOpen && localChatSelected) model.loadLocalChangedFiles()
+    }
     BackHandler(enabled = tab == 5 && settingsPageId != null) {
         settingsPageId = null
+    }
+    BackHandler(
+        enabled = localChatSelected &&
+            drawerState.currentValue == DrawerValue.Closed &&
+            drawerState.targetValue == DrawerValue.Closed,
+    ) {
+        if (rightPanelOpen || rightPanelDragging) {
+            rightPanelOpen = false
+            rightPanelDragging = false
+            rightPanelRevealPx = 0f
+        } else {
+            rightPanelOpen = true
+            rightPanelRevealPx = rightPanelWidthPx
+        }
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -882,25 +908,39 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                             rightPanelRevealPx = 0f
                         },
                 )
-                DesktopRightSidebar(
-                    state = state,
-                    model = model,
-                    screen = tab,
-                    onClose = {
-                        rightPanelOpen = false
-                        rightPanelRevealPx = 0f
-                    },
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .offset {
-                            IntOffset(
-                                x = (rightPanelWidthPx - rightPanelRevealPx).roundToInt(),
-                                y = 0,
-                            )
-                        }
-                        .fillMaxHeight()
-                        .width(rightPanelWidth),
-                )
+                val panelModifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .offset {
+                        IntOffset(
+                            x = (rightPanelWidthPx - rightPanelRevealPx).roundToInt(),
+                            y = 0,
+                        )
+                    }
+                    .fillMaxHeight()
+                    .width(rightPanelWidth)
+                val closePanel = {
+                    rightPanelOpen = false
+                    rightPanelRevealPx = 0f
+                }
+                if (localChatSelected) {
+                    LocalChangedFilesSidebar(
+                        state = state,
+                        onClose = closePanel,
+                        onDownload = { path ->
+                            pendingLocalExportPath = path
+                            localFileExporter.launch(path.substringAfterLast('/').ifBlank { "file" })
+                        },
+                        modifier = panelModifier,
+                    )
+                } else {
+                    DesktopRightSidebar(
+                        state = state,
+                        model = model,
+                        screen = tab,
+                        onClose = closePanel,
+                        modifier = panelModifier,
+                    )
+                }
             }
         }
     }
@@ -972,6 +1012,165 @@ private data class DrawerDestination(
     val label: String,
     val icon: ImageVector,
 )
+
+@Composable
+private fun LocalChangedFilesSidebar(
+    state: MobileUiState,
+    onClose: () -> Unit,
+    onDownload: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val panelContentColor = rightSidebarContentColor()
+    Surface(
+        modifier = modifier,
+        color = if (MaterialTheme.colorScheme.background.luminance() < .5f) {
+            Color(0xFF141F31)
+        } else MaterialTheme.colorScheme.background,
+        contentColor = panelContentColor,
+    ) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(
+                        stringResource(R.string.local_files_title),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = panelContentColor,
+                    )
+                    Text(
+                        stringResource(R.string.local_files_subtitle),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = onClose) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        stringResource(R.string.right_sidebar_close),
+                        tint = panelContentColor,
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f))
+            when {
+                state.localChangedFilesLoading -> Box(
+                    Modifier.fillMaxSize(), contentAlignment = Alignment.Center,
+                ) { CircularProgressIndicator() }
+                state.localChangedFiles.isEmpty() -> Box(
+                    Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        stringResource(R.string.local_files_empty),
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                else -> LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(state.localChangedFiles, key = { it.optString("path") }) { file ->
+                        val path = file.optString("path")
+                        val fileName = path.substringAfterLast('/')
+                        val parentPath = path.substringBeforeLast('/', missingDelimiterValue = "")
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics {
+                                    contentDescription = "$fileName, ${file.optLong("size").let(::formatFileSize)}"
+                                }
+                                .clickable { onDownload(path) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = rightSidebarCardColor(),
+                                contentColor = panelContentColor,
+                            ),
+                            border = BorderStroke(
+                                1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .52f),
+                            ),
+                            shape = RoundedCornerShape(18.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Surface(
+                                    modifier = Modifier.size(44.dp),
+                                    shape = RoundedCornerShape(13.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .72f),
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Outlined.AttachFile,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                }
+                                Column(
+                                    Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                                ) {
+                                    Text(
+                                        fileName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = panelContentColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (parentPath.isNotBlank()) {
+                                        Text(
+                                            parentPath,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Text(
+                                        formatFileSize(file.optLong("size")),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.Download,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Text(
+                                            stringResource(R.string.local_files_download),
+                                            style = MaterialTheme.typography.labelLarge,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -3303,9 +3502,13 @@ private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
             permissionMode = state.permissionMode,
             onPermissionModeChange = model::setPermissionMode,
             busy = state.creatingChat,
-            onSend = {
-                if (model.sendNewChatMessage(message, state.permissionMode)) {
+            onModeMenuUnavailable = model::showLocalPermissionModeUnsupported,
+            onSend = { attachments ->
+                if (model.sendNewChatMessage(message, state.permissionMode, attachments)) {
                     message = ""
+                    true
+                } else {
+                    false
                 }
             },
         )
@@ -3331,9 +3534,22 @@ private fun PendingChatDetail(
     permissionMode: PermissionMode,
     onPermissionModeChange: (PermissionMode) -> Unit,
     busy: Boolean,
-    onSend: () -> Unit,
+    onModeMenuUnavailable: () -> Unit,
+    onSend: (List<PendingAttachment>) -> Boolean,
 ) {
+    val context = LocalContext.current
     val isLocal = selectedProject.optString("id") == LOCAL_PROJECT_ID
+    var pendingAttachments by remember(selectedProject.optString("id")) {
+        mutableStateOf<List<PendingAttachment>>(emptyList())
+    }
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        val added = uris.mapNotNull { uri -> pendingAttachment(context, uri) }
+        pendingAttachments = (pendingAttachments + added)
+            .distinctBy { it.uri.toString() }
+            .take(5)
+    }
     Box(Modifier.fillMaxSize()) {
         NewChatWelcome(
             projects = projects,
@@ -3351,13 +3567,17 @@ private fun PendingChatDetail(
             onPermissionModeChange = onPermissionModeChange,
             running = false,
             busy = busy,
-            attachments = emptyList(),
-            onAddAttachment = {},
-            onRemoveAttachment = {},
-            onSend = onSend,
+            attachments = pendingAttachments,
+            onAddAttachment = { attachmentPicker.launch(arrayOf("*/*")) },
+            onRemoveAttachment = { removed ->
+                pendingAttachments = pendingAttachments.filterNot { it.uri == removed.uri }
+            },
+            onSend = {
+                if (onSend(pendingAttachments)) pendingAttachments = emptyList()
+            },
             onInterrupt = {},
-            attachmentsEnabled = !isLocal,
             modeMenuEnabled = !isLocal,
+            onModeMenuUnavailable = onModeMenuUnavailable,
             placeholderRes = if (isLocal) {
                 R.string.local_agent_composer
             } else {
@@ -3365,7 +3585,9 @@ private fun PendingChatDetail(
             },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 14.dp),
         )
     }
 }
@@ -3483,7 +3705,9 @@ private fun ChatDetail(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .navigationBarsPadding()
+                    .imePadding()
+                    .padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 14.dp)
             ) {
                 if (pendingQuestion != null) {
                     ApprovalQuestionCard(
@@ -3517,8 +3741,8 @@ private fun ChatDetail(
                         }
                     },
                     onInterrupt = model::interruptRun,
-                    attachmentsEnabled = !isLocal,
                     modeMenuEnabled = !isLocal,
+                    onModeMenuUnavailable = model::showLocalPermissionModeUnsupported,
                     inputEnabled = !(isLocal && state.activeRunId != null),
                     interruptWhileRunning = isLocal,
                     placeholderRes = if (isLocal) {
@@ -3786,6 +4010,8 @@ private fun ChatComposer(
     planModeEnabled: Boolean = true,
     interruptWhileRunning: Boolean = false,
     attachmentsEnabled: Boolean = true,
+    onAttachmentsUnavailable: () -> Unit = {},
+    onModeMenuUnavailable: () -> Unit = {},
     inputEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
@@ -3793,7 +4019,7 @@ private fun ChatComposer(
     val submit = {
         when {
             running && (message.isBlank() || interruptWhileRunning) -> onInterrupt()
-            message.isNotBlank() && !busy -> onSend()
+            (message.isNotBlank() || attachments.isNotEmpty()) && !busy -> onSend()
         }
     }
     Surface(
@@ -3882,23 +4108,29 @@ private fun ChatComposer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(
-                    onClick = onAddAttachment,
-                    enabled = attachmentsEnabled && !running && !busy,
+                    onClick = {
+                        if (attachmentsEnabled) onAddAttachment()
+                        else onAttachmentsUnavailable()
+                    },
+                    enabled = !running && !busy,
                     modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
                         Icons.Outlined.AttachFile,
                         contentDescription = stringResource(R.string.chat_add_attachment),
                         modifier = Modifier.size(19.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                            alpha = if (attachmentsEnabled) 1f else .45f,
+                        ),
                     )
                 }
                 Box {
                     Surface(
                         modifier = Modifier
                             .height(36.dp)
-                            .clickable(enabled = !running && modeMenuEnabled) {
-                                modeMenuOpen = true
+                            .clickable(enabled = !running) {
+                                if (modeMenuEnabled) modeMenuOpen = true
+                                else onModeMenuUnavailable()
                             },
                         color = if (permissionMode != PermissionMode.AUTO) {
                             MaterialTheme.colorScheme.primaryContainer.copy(alpha = .7f)
@@ -4006,7 +4238,7 @@ private fun ChatComposer(
                 Spacer(Modifier.weight(1f))
                 Button(
                     onClick = submit,
-                    enabled = (running || message.isNotBlank()) && !busy,
+                    enabled = (running || message.isNotBlank() || attachments.isNotEmpty()) && !busy,
                     modifier = Modifier.height(36.dp),
                     shape = RoundedCornerShape(9.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp),
@@ -4242,7 +4474,9 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
                 interruptWhileRunning = true,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                    .navigationBarsPadding()
+                    .imePadding()
+                    .padding(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 16.dp),
             )
         }
     }
@@ -4761,6 +4995,36 @@ private fun SettingsScreen(
         model.clearDesktopOpenAiOAuthAuthUrl()
     }
 
+    state.desktopOpenAiOAuthUserCode?.let { code ->
+        AlertDialog(
+            onDismissRequest = model::cancelMobileOpenAiOAuthLogin,
+            title = { Text(stringResource(R.string.settings_model_oauth_login)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(R.string.settings_model_oauth_device_instructions))
+                    SelectionContainer {
+                        Text(
+                            code,
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(stringResource(R.string.settings_model_oauth_waiting))
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(onClick = model::cancelMobileOpenAiOAuthLogin) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+        )
+    }
+
     editingField?.let { field ->
         val type = field.optString("type")
         val label = localizedSettingText(field, "label")
@@ -4893,16 +5157,14 @@ private fun SettingsScreen(
                         )
                     }
                 }
-                if (state.desktopModels != null) {
-                    item {
-                        SectionCard(stringResource(R.string.settings_models_section)) {
-                            SettingsMenuRow(
-                                title = stringResource(R.string.settings_models_title),
-                                subtitle = stringResource(R.string.settings_models_description),
-                                onClick = { onOpenPage("models") },
-                            )
+                item {
+                    SectionCard(stringResource(R.string.settings_models_section)) {
+                        SettingsMenuRow(
+                            title = stringResource(R.string.settings_models_title),
+                            subtitle = stringResource(R.string.settings_models_description),
+                            onClick = { onOpenPage("models") },
+                        )
                         }
-                    }
                 }
                 item {
                     SectionCard(stringResource(R.string.settings_desktop_section)) {
@@ -5000,27 +5262,18 @@ private fun SettingsScreen(
                 contentPadding = PaddingValues(18.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                state.desktopModels?.let { models ->
-                    item {
-                        ModelSettingsCard(
-                            models = models,
+                item {
+                    ModelSettingsCard(
+                            models = state.desktopModels ?: JSONObject()
+                                .put("source", "custom")
+                                .put("custom_models", JSONArray())
+                                .put("vision_models", JSONArray()),
                             busy = state.busy,
                             oauth = state.desktopOpenAiOAuth,
                             oauthBusy = state.desktopOpenAiOAuthLoading,
                             model = model,
                             showTitle = false,
                         )
-                    }
-                } ?: item {
-                    SectionCard(null) {
-                        Text(
-                            stringResource(R.string.settings_desktop_unavailable),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        OutlinedButton(onClick = model::loadDesktopSettings) {
-                            Text(stringResource(R.string.action_refresh))
-                        }
-                    }
                 }
             }
         }
@@ -5856,7 +6109,7 @@ private fun ModelSettingsCard(
                             "secondary" -> next.put("secondary_model", updated)
                             "codex" -> next.put("codex_model", updated)
                         }
-                        model.updateDesktopModels(next)
+                        model.updateLocalModels(next)
                         editTarget = null
                     },
                 ) { Text(stringResource(R.string.action_save)) }
@@ -5883,7 +6136,7 @@ private fun ModelSettingsCard(
                                         JSONObject.NULL,
                                     )
                                 }
-                                model.updateDesktopModels(next)
+                                model.updateLocalModels(next)
                                 editTarget = null
                             },
                         ) { Text(stringResource(R.string.action_delete)) }
@@ -5914,7 +6167,7 @@ private fun ModelSettingsCard(
             enabled = !busy && !oauthBusy,
         ) {
             selectedSource = "custom"
-            model.updateDesktopModels(
+            model.updateLocalModels(
                 JSONObject(models.toString()).put("source", "custom"),
             )
         }
@@ -5924,7 +6177,7 @@ private fun ModelSettingsCard(
             enabled = !busy && !oauthBusy,
         ) {
             selectedSource = "codex"
-            model.updateDesktopModels(
+            model.updateLocalModels(
                 JSONObject(models.toString()).put("source", "codex"),
             )
         }
@@ -6048,7 +6301,7 @@ private fun ModelSettingsCard(
                             .put("base_url", "codex://oauth")
                             .put("reasoning_effort", effectiveOAuthReasoning)
                             .put("description", "OpenAI OAuth")
-                        model.updateDesktopModels(
+                        model.updateLocalModels(
                             JSONObject(models.toString())
                                 .put("codex_model", candidate)
                                 .put("source", "codex"),
@@ -6056,11 +6309,13 @@ private fun ModelSettingsCard(
                     },
                     enabled = oauthSelection.isNotBlank() && !busy && !oauthBusy,
                 ) { Text(stringResource(R.string.settings_model_oauth_use)) }
+            }
+            }
+            if (oauthConnected) {
                 OutlinedButton(
                     onClick = model::logoutDesktopOpenAiOAuth,
                     enabled = !busy && !oauthBusy,
                 ) { Text(stringResource(R.string.settings_model_oauth_logout)) }
-            }
             }
         } else {
         Text(
@@ -7030,6 +7285,7 @@ private fun localizedTraceLabel(label: String): String {
         "Edit", "edit", "edit_file" -> R.string.tool_name_edit
         "Glob", "glob" -> R.string.tool_name_glob
         "Grep", "grep" -> R.string.tool_name_grep
+        "PublishFile", "publish_file" -> R.string.tool_name_publish_file
         "WebFetch", "web_fetch" -> R.string.tool_name_web_fetch
         "WebSearch", "web_search", "search_web", "网络搜索" -> R.string.tool_name_web_search
         "browser_tools" -> R.string.tool_name_browser_tools
@@ -7047,7 +7303,12 @@ private fun localizedTraceLabel(label: String): String {
         "task_tools" -> R.string.tool_name_task_tools
         else -> null
     }
-    return (resource?.let { stringResource(it) } ?: tool) + suffix
+    val localizedSuffix = when (suffix.removePrefix("（").removeSuffix("）")) {
+        "File published for download" ->
+            "（${stringResource(R.string.tool_result_file_published)}）"
+        else -> suffix
+    }
+    return (resource?.let { stringResource(it) } ?: tool) + localizedSuffix
 }
 
 private data class TraceDisplay(

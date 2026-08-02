@@ -1,6 +1,7 @@
 package ai.cyrene.mobile.localagent.runtime
 
 import ai.cyrene.mobile.data.SecureStore
+import ai.cyrene.mobile.data.MobileOpenAiOAuthClient
 import ai.cyrene.mobile.localagent.model.MODEL_EVENT_SCHEMA
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** Direct, on-device OpenAI-compatible Provider transport for local sessions. */
 class MobileProviderClient(private val store: SecureStore) : LocalModelTransport {
+    private val openAiOAuth = MobileOpenAiOAuthClient(store)
     private val previousAssistantMessages = ConcurrentHashMap<String, JSONObject>()
 
     override suspend fun start(payload: JSONObject, idempotencyKey: String): JSONObject = complete(payload)
@@ -25,7 +27,12 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
     private suspend fun complete(payload: JSONObject): JSONObject = withContext(Dispatchers.IO) {
         val turnId = payload.getString("model_turn_id")
         val phase = payload.getString("phase")
-        val candidate = primaryCandidate()
+        val configuration = store.localModelConfiguration()
+            ?: throw IllegalStateException("请先在设置中配置模型")
+        if (configuration.optString("source", "custom") == "codex") {
+            return@withContext completeCodex(payload, configuration)
+        }
+        val candidate = primaryCandidate(configuration)
         val request = JSONObject()
             .put("model", candidate.getString("model"))
             .put("messages", messages(payload, phase))
@@ -77,12 +84,7 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
         JSONObject().put("model_turn_id", turnId).put("state", "COMPLETED").put("events", events)
     }
 
-    private fun primaryCandidate(): JSONObject {
-        val models = store.localModelConfiguration()
-            ?: throw IllegalStateException("请先在设置中从桌面端复制模型配置")
-        if (models.optString("source", "custom") != "custom") {
-            throw IllegalStateException("Codex OAuth 凭据不能复制到移动端；请选择 API Key 模型")
-        }
+    private fun primaryCandidate(models: JSONObject): JSONObject {
         val candidate = models.optJSONArray("custom_models")?.optJSONObject(0)
             ?: throw IllegalStateException("移动端没有可用的模型配置")
         require(candidate.optString("provider", "openai_compatible") == "openai_compatible") {
@@ -95,6 +97,123 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
             "模型 Base URL 无效"
         }
         return candidate
+    }
+
+    private fun completeCodex(payload: JSONObject, models: JSONObject): JSONObject {
+        val turnId = payload.getString("model_turn_id")
+        val phase = payload.getString("phase")
+        val candidate = models.optJSONObject("codex_model") ?: JSONObject()
+        val model = candidate.optString("model").ifBlank { "gpt-5.1-codex" }
+        val input = JSONArray()
+        val sourceItems = payload.optJSONArray("input_items") ?: JSONArray()
+        for (index in 0 until sourceItems.length()) {
+            val source = sourceItems.optJSONObject(index) ?: continue
+            input.put(JSONObject()
+                .put("role", source.optString("role", "user"))
+                .put("content", source.optString("content").take(500_000)))
+        }
+        val toolResults = payload.optJSONArray("tool_results") ?: JSONArray()
+        for (index in 0 until toolResults.length()) {
+            val result = toolResults.optJSONObject(index) ?: continue
+            input.put(JSONObject()
+                .put("type", "function_call_output")
+                .put("call_id", result.optString("call_id"))
+                .put("output", result.optString("inline_payload")
+                    .ifBlank { result.optString("summary") }.take(128_000)))
+        }
+        val request = JSONObject()
+            .put("model", model)
+            .put("instructions", systemPrompt(phase))
+            .put("input", input)
+            .put("tools", responsesTools(if (phase == "decision") decisionTools() else executionTools()))
+            .put("tool_choice", "auto")
+            .put("parallel_tool_calls", false)
+            .put("store", false)
+            .put("stream", false)
+        candidate.optString("reasoning_effort").takeIf(String::isNotBlank)?.let {
+            request.put("reasoning", JSONObject().put("effort", it).put("summary", "auto"))
+        }
+        val response = postCodex(request)
+        val events = JSONArray()
+        var sequence = 1
+        fun event(type: String, body: JSONObject = JSONObject()) {
+            events.put(JSONObject().put("schema", MODEL_EVENT_SCHEMA).put("model_turn_id", turnId)
+                .put("sequence", sequence++).put("type", type).put("payload", body))
+        }
+        event("turn.started", JSONObject().put("phase", phase))
+        val output = response.optJSONArray("output") ?: JSONArray()
+        val text = StringBuilder()
+        for (index in 0 until output.length()) {
+            val item = output.optJSONObject(index) ?: continue
+            when (item.optString("type")) {
+                "message" -> {
+                    val content = item.optJSONArray("content") ?: JSONArray()
+                    for (partIndex in 0 until content.length()) {
+                        val part = content.optJSONObject(partIndex) ?: continue
+                        if (part.optString("type") == "output_text") text.append(part.optString("text"))
+                    }
+                }
+                "function_call" -> {
+                    val callId = item.optString("call_id").ifBlank { item.optString("id") }
+                    event("tool_call.started", JSONObject().put("call_id", callId).put("name", item.optString("name")))
+                    event("tool_call.completed", JSONObject().put("call_id", callId)
+                        .put("name", item.optString("name")).put("arguments_json", item.optString("arguments", "{}")))
+                }
+                "reasoning" -> {
+                    val summary = item.optJSONArray("summary") ?: JSONArray()
+                    val reasoning = (0 until summary.length()).joinToString("\n") {
+                        summary.optJSONObject(it)?.optString("text").orEmpty()
+                    }.trim()
+                    if (reasoning.isNotBlank()) event("reasoning.status", JSONObject().put("content", reasoning))
+                }
+            }
+        }
+        if (text.isNotEmpty()) {
+            event("message.delta", JSONObject().put("delta", text.toString()))
+            event("message.completed", JSONObject().put("content", text.toString()))
+        }
+        response.optJSONObject("usage")?.let { event("usage.updated", it) }
+        event("turn.completed", JSONObject().put("finish_reason", response.optString("status", "completed")))
+        return JSONObject().put("model_turn_id", turnId).put("state", "COMPLETED").put("events", events)
+    }
+
+    private fun responsesTools(chatTools: JSONArray): JSONArray = JSONArray().also { result ->
+        for (index in 0 until chatTools.length()) {
+            val function = chatTools.optJSONObject(index)?.optJSONObject("function") ?: continue
+            result.put(JSONObject()
+                .put("type", "function")
+                .put("name", function.optString("name"))
+                .put("description", function.optString("description"))
+                .put("parameters", function.optJSONObject("parameters") ?: JSONObject()))
+        }
+    }
+
+    private fun postCodex(body: JSONObject): JSONObject {
+        val connection = URL("${MobileOpenAiOAuthClient.CODEX_BASE}/responses").openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 180_000
+            connection.doOutput = true
+            connection.instanceFollowRedirects = false
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Accept", "application/json")
+            openAiOAuth.authHeaders().forEach(connection::setRequestProperty)
+            val bytes = body.toString().toByteArray(Charsets.UTF_8)
+            connection.setFixedLengthStreamingMode(bytes.size)
+            connection.outputStream.use { it.write(bytes) }
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (status !in 200..299) {
+                val detail = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }
+                    .getOrNull().orEmpty().ifBlank { "HTTP $status" }
+                throw IllegalStateException("OpenAI 请求失败：${detail.take(500)}")
+            }
+            return JSONObject(text)
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun messages(payload: JSONObject, phase: String): JSONArray {
@@ -147,9 +266,33 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
     }
 
     private fun systemPrompt(phase: String): String = if (phase == "decision") {
-        """你是运行在 Android 设备上的 Cyrene 本地 Agent。直接回答不需要工具的问题；需要本地文件或命令时调用 use_tools，信息不足时调用 ask_user，明确无法继续时调用 quit。不要声称已经执行尚未执行的操作。"""
+        """
+        你是 Cyrene 本地 Agent。模型推理在 Android 设备上进行；文件和命令工具在同一设备内真实的 QEMU Alpine Linux 虚拟机中执行。
+
+        能力事实：
+        - Linux 虚拟机拥有持久化、跨本地会话共享的 /workspace。
+        - 虚拟机通过 QEMU NAT 使用 Android 当前网络，正常情况下可解析 DNS、访问 HTTP/HTTPS，并可通过 apk 安装 Alpine 软件包。
+        - 基础镜像可能尚未安装 Python、pip、curl 等命令；“command not found”只表示软件缺失，不表示没有网络，可进入工具阶段用 apk 安装。
+
+        直接回答确实不需要工具的问题。凡是涉及设备文件、系统状态、命令是否存在、网络是否可用、安装软件或需要生成/修改文件，都必须调用 use_tools 实测和执行；信息不足时调用 ask_user，经过实测仍明确无法继续时调用 quit。不要把环境假设当成事实，也不要声称已经执行尚未执行的操作。
+        """.trimIndent()
     } else {
-        """你是运行在 Android 隔离 Linux 工作区中的 Cyrene 本地 Agent。使用提供的工具完成用户请求；路径必须相对于会话工作区。完成后直接给出最终回答。不要伪造工具结果。"""
+        """
+        你是 Cyrene 本地 Agent，正在一台真实的 QEMU Alpine Linux 虚拟机中使用工具完成用户任务。
+
+        运行环境：
+        - Bash 默认工作目录是 /workspace。所有本地会话共享并持久化这一个工作区和同一份 Linux 根文件系统；安装的软件也会保留并可被其他本地会话使用。
+        - Read、Write、Edit、Glob、Grep、PublishFile 的路径必须相对于 /workspace，禁止使用绝对路径或 .. 越界。
+        - 虚拟机已配置 QEMU NAT 网络，可使用 DNS、HTTP/HTTPS 和 Alpine apk 仓库；实际连通性仍可能随 Android 当前网络临时变化。
+        - 这是精简 Alpine 镜像。缺少某个命令或运行时不代表能力不存在，也不代表断网；优先执行 apk update，并用 apk add 安装所需软件。不要使用 apt、apt-get 或 dpkg。
+
+        网络诊断规则：
+        - 不得仅根据 ping 失败、单个网址失败、单次 wget/curl 失败或某个命令不存在，就断言“没有网络”。ICMP、特定协议或站点可能被单独限制。
+        - 宣布网络不可用前，至少分别检查默认路由、DNS 解析和 HTTPS/软件仓库，例如 ip route、nslookup dl-cdn.alpinelinux.org、apk update，并准确报告每一步的原始错误。
+        - 若 DNS 或网络在切换后暂时失败，可以短暂重试；仍失败时说明是路由、DNS、TLS、仓库还是具体站点失败，不要笼统归因。
+
+        持续使用工具直到任务完成或出现有证据支持的阻塞。产生用户可能需要下载到虚拟机之外的最终文件时，必须对每个最终文件调用 PublishFile；不要发布临时文件、中间产物或目录。根据真实工具结果回答，不伪造执行、文件、软件安装或网络状态。最终回答简洁说明完成内容；失败时给出具体失败命令、错误和可行的下一步。
+        """.trimIndent()
     }
 
     private fun function(name: String, description: String, properties: JSONObject, required: List<String> = emptyList()): JSONObject =
@@ -171,4 +314,5 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
         .put(function("Glob", "按 glob 查找工作区文件", JSONObject().put("pattern", stringProperty("例如 **/*.kt")), listOf("pattern")))
         .put(function("Grep", "搜索工作区文本", JSONObject().put("pattern", stringProperty("正则表达式")).put("path", stringProperty("相对目录，默认 .")), listOf("pattern")))
         .put(function("Bash", "在隔离工作区执行 shell 命令", JSONObject().put("command", stringProperty("命令")), listOf("command")))
+        .put(function("PublishFile", "将已完成的工作区文件发布到本地对话的可下载文件列表", JSONObject().put("path", stringProperty("最终文件的工作区相对路径")), listOf("path")))
 }

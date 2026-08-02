@@ -23,6 +23,7 @@ data class ToolCallEntity(
 data class LocalMessageEntity(
     val messageId: String, val sessionId: String, val role: String,
     val content: String, val createdAt: String,
+    val attachmentsJson: String = "[]",
 )
 data class LocalTraceEntity(
     val runId: String?,
@@ -48,6 +49,7 @@ class LocalAgentDatabase private constructor(context: Context) :
             when (version) {
                 1 -> migrateToDeviceOnlySessions(db)
                 2 -> migrateToTimestampedSessions(db)
+                3 -> migrateToMessageAttachments(db)
                 else -> error("Missing Local Agent database migration $version -> ${version + 1}")
             }
             version += 1
@@ -58,7 +60,7 @@ class LocalAgentDatabase private constructor(context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "cyrene-local-agent.db"
-        private const val SCHEMA_VERSION = 3
+        private const val SCHEMA_VERSION = 4
         @Volatile private var instance: LocalAgentDatabase? = null
         fun open(context: Context): LocalAgentDatabase = instance ?: synchronized(this) {
             instance ?: LocalAgentDatabase(context).also { instance = it }
@@ -91,9 +93,15 @@ class LocalAgentDatabase private constructor(context: Context) :
             )
         }
 
+        private fun migrateToMessageAttachments(db: SQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+            )
+        }
+
         private val SCHEMA = listOf(
             """CREATE TABLE local_sessions(session_id TEXT PRIMARY KEY,title TEXT NOT NULL,execution_target TEXT NOT NULL,tombstone INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""",
-            """CREATE TABLE messages(message_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT NOT NULL)""",
+            """CREATE TABLE messages(message_id TEXT PRIMARY KEY,event_id TEXT NOT NULL,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT NOT NULL,attachments_json TEXT NOT NULL DEFAULT '[]')""",
             """CREATE TABLE runs(run_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,state TEXT NOT NULL,bundle_generation INTEGER NOT NULL,lease_id TEXT,budget_json TEXT NOT NULL,stop_reason TEXT,updated_at TEXT NOT NULL)""",
             """CREATE TABLE model_turns(model_turn_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,phase TEXT NOT NULL,idempotency_key TEXT NOT NULL,provider_state_ref TEXT,event_cursor INTEGER NOT NULL,state TEXT NOT NULL)""",
             """CREATE TABLE tool_calls(call_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,name TEXT NOT NULL,schema_hash TEXT NOT NULL,args_hash TEXT NOT NULL,executor TEXT NOT NULL,status TEXT NOT NULL,result_json TEXT)""",
@@ -151,16 +159,26 @@ class LocalAgentDao(private val helper: LocalAgentDatabase) {
             arrayOf(sessionId),
         )
 
-    suspend fun saveMessage(sessionId: String, role: String, content: String): LocalMessageEntity {
+    suspend fun saveMessage(
+        sessionId: String,
+        role: String,
+        content: String,
+        attachmentsJson: String = "[]",
+    ): LocalMessageEntity {
         require(role in setOf("user", "assistant"))
+        require(runCatching { org.json.JSONArray(attachmentsJson) }.isSuccess) {
+            "attachments_json must be a JSON array"
+        }
         val value = LocalMessageEntity(
             "msg_${java.util.UUID.randomUUID().toString().replace("-", "")}",
             sessionId, role, content.take(500_000), System.currentTimeMillis().toString(),
+            attachmentsJson,
         )
         helper.writableDatabase.insertOrThrow("messages", null, ContentValues().apply {
             put("message_id", value.messageId); put("event_id", value.messageId)
             put("session_id", value.sessionId); put("role", value.role)
             put("content", value.content); put("created_at", value.createdAt)
+            put("attachments_json", value.attachmentsJson)
         })
         helper.writableDatabase.update(
             "local_sessions",
@@ -173,14 +191,14 @@ class LocalAgentDao(private val helper: LocalAgentDatabase) {
 
     suspend fun messages(sessionId: String, limit: Int = 100): List<LocalMessageEntity> =
         helper.readableDatabase.rawQuery(
-            "SELECT message_id,session_id,role,content,created_at FROM " +
+            "SELECT message_id,session_id,role,content,created_at,attachments_json FROM " +
                 "(SELECT * FROM messages WHERE session_id=? ORDER BY CAST(created_at AS INTEGER) DESC LIMIT ?) " +
                 "ORDER BY CAST(created_at AS INTEGER) ASC",
             arrayOf(sessionId, limit.coerceIn(1, 500).toString()),
         ).use { cursor -> buildList {
             while (cursor.moveToNext()) add(LocalMessageEntity(
                 cursor.text("message_id"), cursor.text("session_id"), cursor.text("role"),
-                cursor.text("content"), cursor.text("created_at"),
+                cursor.text("content"), cursor.text("created_at"), cursor.text("attachments_json"),
             ))
         } }
 

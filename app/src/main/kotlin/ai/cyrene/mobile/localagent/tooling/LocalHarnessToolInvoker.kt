@@ -13,8 +13,9 @@ class LocalHarnessToolInvoker(
     private val sessionId: String,
     private val generation: Long,
     private val runtime: RuntimeCompanionClient,
+    mountedInitially: Boolean = false,
 ) : HarnessToolInvoker {
-    private var mounted = false
+    private var mounted = mountedInitially
 
     override suspend fun invoke(callId: String, name: String, arguments: JSONObject): ToolResult = try {
         when (name) {
@@ -24,11 +25,36 @@ class LocalHarnessToolInvoker(
             "Glob" -> guest(callId, GuestOperation.FS_GLOB, arguments)
             "Grep" -> guest(callId, GuestOperation.FS_GREP, arguments)
             "Bash" -> guest(callId, GuestOperation.EXEC_START, arguments)
+            "PublishFile" -> publishFile(callId, arguments)
             "code_tools" -> packageGateway(callId, arguments, CODE_CAPABILITIES)
             else -> ToolResult(callId, ToolResultStatus.DENIED, "Capability is not available in the frozen mobile runtime", errorType = "mobile_incompatible")
         }
     } catch (error: Throwable) {
         ToolResult(callId, ToolResultStatus.ERROR, error.message ?: "Tool execution failed", errorType = "executor_error")
+    }
+
+    private suspend fun publishFile(callId: String, arguments: JSONObject): ToolResult {
+        if (!mounted) {
+            val mount = runtime.submit(
+                sessionId, GuestOperation.SESSION_MOUNT,
+                JSONObject().put("generation", generation), timeoutMs = 120_000,
+            )
+            if (mount.status != "success") return guestFailure(callId, mount.errorType, mount.message)
+            mounted = true
+        }
+        val response = runtime.submit(
+            sessionId, GuestOperation.ARTIFACT_EXPORT,
+            JSONObject().put("path", arguments.getString("path")).put("offset", 0).put("limit", 1),
+            timeoutMs = 30_000,
+        )
+        return if (response.status == "success") {
+            ToolResult(
+                callId, ToolResultStatus.SUCCESS, "File published for download",
+                inlinePayload = JSONObject().put("published_file", JSONObject()
+                    .put("path", response.payload.getString("path"))
+                    .put("size", response.payload.getLong("size"))).toString(),
+            )
+        } else guestFailure(callId, response.errorType, response.message)
     }
 
     private suspend fun guest(callId: String, operation: GuestOperation, arguments: JSONObject): ToolResult {

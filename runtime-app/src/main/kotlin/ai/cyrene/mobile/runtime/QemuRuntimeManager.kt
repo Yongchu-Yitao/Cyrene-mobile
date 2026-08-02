@@ -35,6 +35,7 @@ class QemuRuntimeManager(private val context: Context) {
                 GuestOperation.FS_LIST -> fsList(request)
                 GuestOperation.FS_READ -> fsRead(request)
                 GuestOperation.FS_WRITE -> fsWrite(request)
+                GuestOperation.FS_WRITE_CHUNK -> fsWriteChunk(request)
                 GuestOperation.FS_PATCH -> fsPatch(request)
                 GuestOperation.FS_GLOB -> fsGlob(request)
                 GuestOperation.FS_GREP -> fsGrep(request)
@@ -166,6 +167,33 @@ class QemuRuntimeManager(private val context: Context) {
         return success(request, JSONObject().put("path", file).put("bytes", result.stdout.trim().toLong()))
     }
 
+    private fun fsWriteChunk(request: GuestRequest): GuestResponse {
+        val file = path(request, request.payload.getString("path"))
+        val offset = request.payload.getLong("offset")
+        require(offset >= 0) { "Chunk offset must be non-negative" }
+        val bytes = Base64.decode(request.payload.getString("content_base64"), Base64.DEFAULT)
+        require(bytes.size <= 256 * 1024) { "Chunk exceeds 256 KiB" }
+        val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val target = quote(file)
+        val write = if (offset == 0L) {
+            "mkdir -p \"\$(dirname \"\$p\")\"; printf '%s' ${quote(encoded)} | base64 -d > \"\$p\""
+        } else {
+            "[ -f \"\$p\" ] && [ \"\$(stat -c %s \"\$p\")\" -eq $offset ] || exit 45; " +
+                "printf '%s' ${quote(encoded)} | base64 -d >> \"\$p\""
+        }
+        val result = guest(
+            request,
+            "p=$target; $write; stat -c %s \"\$p\"",
+        )
+        val nextOffset = result.stdout.trim().toLong()
+        require(nextOffset == offset + bytes.size) { "Runtime wrote an unexpected chunk length" }
+        return success(
+            request,
+            JSONObject().put("path", file).put("offset", offset)
+                .put("bytes", bytes.size).put("next_offset", nextOffset),
+        )
+    }
+
     private fun fsPatch(request: GuestRequest): GuestResponse {
         val file = path(request, request.payload.getString("path"))
         val old = request.payload.getString("old_string")
@@ -227,9 +255,21 @@ class QemuRuntimeManager(private val context: Context) {
     }
 
     private fun artifact(request: GuestRequest): GuestResponse {
-        val stat = fsStat(request.copy(payload = JSONObject().put("path", request.payload.getString("path"))))
+        val path = request.payload.getString("path")
+        val stat = fsStat(request.copy(payload = JSONObject().put("path", path)))
         require(stat.payload.optBoolean("is_file")) { "Artifact does not exist" }
-        return success(request, JSONObject().put("path", stat.payload.getString("path")).put("size", stat.payload.getLong("size")))
+        val offset = request.payload.optLong("offset", 0).coerceAtLeast(0)
+        val limit = request.payload.optInt("limit", 256 * 1024).coerceIn(1, 256 * 1024)
+        val file = stat.payload.getString("path")
+        val size = stat.payload.getLong("size")
+        require(offset <= size) { "Artifact offset exceeds file size" }
+        val result = guest(request, "p=${quote(file)}; tail -c +${offset + 1} \"\$p\" | head -c $limit | base64 | tr -d '\\n'")
+        val bytes = result.stdout.takeIf(String::isNotBlank)?.let { Base64.decode(it, Base64.DEFAULT) }
+            ?: byteArrayOf()
+        return success(request, JSONObject().put("path", file).put("size", size)
+            .put("offset", offset).put("bytes", bytes.size)
+            .put("content_base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            .put("complete", offset + bytes.size >= size))
     }
 
     private fun resourceUsage(request: GuestRequest): GuestResponse {

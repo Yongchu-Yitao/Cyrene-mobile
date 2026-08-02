@@ -4,7 +4,7 @@ Cyrene 的 Android 工作台。App 支持与桌面端安全配对、远程对话
 项目终端，也可在手机本地保存会话、直接调用模型，并通过独立 Runtime APK 在
 QEMU + Alpine Linux 中执行文件与命令工具。
 
-## 0.2.0 功能
+## 0.2.1 功能
 
 - 与桌面端一致的对话信息层级、Markdown、工具调用、附件和图片查看体验。
 - “本地”项目可在桌面离线时运行 Agent；会话数据保存在手机，模型配置由
@@ -21,6 +21,8 @@ QEMU + Alpine Linux 中执行文件与命令工具。
 - 移动终端支持项目切换、实时白色输入、长命令换行和键盘上沿快捷控制栏。
 - 设置页可从 GitHub Release 检查、以 Markdown 展示说明，并一次下载 Runtime 与
   主 App 两个 APK，依次进入各自的系统安装界面。
+- 本地模型支持自定义 OpenAI-compatible API 或手机 OpenAI OAuth；本地对话可上传附件，
+  并通过右侧“变更的文件”面板把 Agent 发布的最终文件保存到 Android 存储。
 
 ## 构建
 
@@ -35,7 +37,7 @@ QEMU + Alpine Linux 中执行文件与命令工具。
 - 主 App：`app/build/outputs/apk/debug/app-debug.apk`
 - Linux Runtime：`runtime-app/build/outputs/apk/debug/runtime-app-debug.apk`
 
-正式发布使用 `v0.2.0` 标签。首次手动安装时先装 Runtime APK，再装主 App APK；
+正式发布使用 `v0.2.1` 标签。首次手动安装时先装 Runtime APK，再装主 App APK；
 App 内更新会自动下载两个包并按此顺序打开安装界面，但 Android 仍要求用户分别确认。
 只使用远程功能时可仅安装主 App。完整说明见仓库的 GitHub Releases。
 
@@ -49,8 +51,8 @@ App 内更新会自动下载两个包并按此顺序打开安装界面，但 And
 客户端通过配对后的加密连接调用桌面 RemoteGateway。App 退出不会停止桌面端
 Run；重新进入终端时会在当前授权项目内建立新的交互式 Shell 会话。
 
-> 完整使用 0.2.0 的移动端权限确认、模型配置复制和 OpenAI OAuth 管理，需要同步
-> 更新支持对应远程命令的 Cyrene Desktop。模型配置复制完成后，本地会话可离线使用。
+> 完整使用移动端权限确认和桌面模型配置复制，需要同步更新支持对应远程命令的 Cyrene
+> Desktop。手机 OpenAI OAuth 与本地会话不依赖桌面端；模型配置保存后可离线于桌面使用。
 
 ## 安全边界
 

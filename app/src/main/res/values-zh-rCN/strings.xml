@@ -163,6 +163,8 @@
     <string name="tool_name_edit">编辑文件</string>
     <string name="tool_name_glob">查找文件</string>
     <string name="tool_name_grep">搜索内容</string>
+    <string name="tool_name_publish_file">发布文件</string>
+    <string name="tool_result_file_published">文件已发布，可供下载</string>
     <string name="tool_name_web_fetch">获取网页</string>
     <string name="tool_name_web_search">网络搜索</string>
     <string name="tool_name_browser_tools">浏览器工具</string>
@@ -330,8 +332,10 @@
     <string name="settings_model_oauth_not_configured">尚未配置 OpenAI OAuth。请在下方登录并发现可用的 Codex 模型。</string>
     <string name="settings_model_openai_oauth_title">OpenAI OAuth</string>
     <string name="settings_model_oauth_connected">OpenAI 账户已连接</string>
-    <string name="settings_model_oauth_hint">将在桌面端通过 OpenAI 登录，OAuth 令牌只保留在桌面端。</string>
+    <string name="settings_model_oauth_hint">请在这部手机上登录 OpenAI。凭据仅加密保存在本机，不从桌面端复制。</string>
     <string name="settings_model_oauth_login">登录 OpenAI</string>
+    <string name="settings_model_oauth_device_instructions">已打开浏览器。登录 OpenAI 后，请输入以下一次性代码：</string>
+    <string name="settings_model_oauth_waiting">正在等待授权…</string>
     <string name="settings_model_oauth_logout">退出登录</string>
     <string name="settings_model_oauth_model">Codex 模型</string>
     <string name="settings_model_oauth_use">将此模型设为主要模型</string>
@@ -624,6 +628,14 @@
     <string name="local_agent_runtime_unavailable">Runtime 不可用</string>
     <string name="local_project_name">本地</string>
     <string name="local_agent_composer">向在此设备运行的 Agent 发送消息</string>
-    <string name="local_agent_attachments_unsupported">本地对话暂不支持附件。</string>
+    <string name="local_agent_attachment_too_large">本机附件超过 32 MB：%1$s</string>
+    <string name="local_agent_attachments_too_large">本机附件总大小超过 32 MB。</string>
+    <string name="local_agent_permission_mode_unsupported">本地对话目前使用固定的自动权限策略；连接桌面项目后可切换权限模式。</string>
     <string name="local_agent_guidance_unsupported">请等待当前本地运行结束，或停止运行后再发送新消息。</string>
+    <string name="local_files_title">变更的文件</string>
+    <string name="local_files_subtitle">此本地对话中 Agent 变更的文件</string>
+    <string name="local_files_empty">此 Agent 尚未变更可下载的文件。</string>
+    <string name="local_files_download">保存</string>
+    <string name="local_files_load_failed">无法加载变更的文件</string>
+    <string name="local_file_export_failed">无法导出文件</string>
 </resources>

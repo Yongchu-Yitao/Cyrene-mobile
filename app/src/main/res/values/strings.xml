@@ -163,6 +163,8 @@
     <string name="tool_name_edit">Edit</string>
     <string name="tool_name_glob">Find files</string>
     <string name="tool_name_grep">Search</string>
+    <string name="tool_name_publish_file">Publish file</string>
+    <string name="tool_result_file_published">File published for download</string>
     <string name="tool_name_web_fetch">Fetch URL</string>
     <string name="tool_name_web_search">Web search</string>
     <string name="tool_name_browser_tools">Browser tools</string>
@@ -330,8 +332,10 @@
     <string name="settings_model_oauth_not_configured">OpenAI OAuth is not configured yet. Sign in below to discover available Codex models.</string>
     <string name="settings_model_openai_oauth_title">OpenAI OAuth</string>
     <string name="settings_model_oauth_connected">OpenAI account connected</string>
-    <string name="settings_model_oauth_hint">Sign in on the desktop through OpenAI. The OAuth token stays on the desktop.</string>
+    <string name="settings_model_oauth_hint">Sign in to OpenAI on this phone. Credentials are encrypted on this device and are not copied from the desktop.</string>
     <string name="settings_model_oauth_login">Sign in with OpenAI</string>
+    <string name="settings_model_oauth_device_instructions">A browser has been opened. Sign in to OpenAI, then enter this one-time code:</string>
+    <string name="settings_model_oauth_waiting">Waiting for authorization…</string>
     <string name="settings_model_oauth_logout">Sign out</string>
     <string name="settings_model_oauth_model">Codex model</string>
     <string name="settings_model_oauth_use">Use this model as primary</string>
@@ -624,6 +628,14 @@
     <string name="local_agent_runtime_unavailable">Runtime unavailable</string>
     <string name="local_project_name">Local</string>
     <string name="local_agent_composer">Message the agent running on this device</string>
-    <string name="local_agent_attachments_unsupported">Attachments are not available in local conversations yet.</string>
+    <string name="local_agent_attachment_too_large">Local attachment is larger than 32 MB: %1$s</string>
+    <string name="local_agent_attachments_too_large">Local attachments exceed the 32 MB total limit.</string>
+    <string name="local_agent_permission_mode_unsupported">Local conversations currently use the fixed Auto permission policy. Connect to a desktop project to switch permission modes.</string>
     <string name="local_agent_guidance_unsupported">Wait for the current local run to finish, or stop it before sending another message.</string>
+    <string name="local_files_title">Changed files</string>
+    <string name="local_files_subtitle">Files changed by this local conversation</string>
+    <string name="local_files_empty">This Agent has not changed any downloadable files yet.</string>
+    <string name="local_files_download">Save</string>
+    <string name="local_files_load_failed">Could not load changed files</string>
+    <string name="local_file_export_failed">Could not export file</string>
 </resources>

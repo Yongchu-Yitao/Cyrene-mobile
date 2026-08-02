@@ -15,8 +15,9 @@ class RuntimeProbeActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Thread {
-            val result = runCatching {
-                val manager = QemuRuntimeManager(this)
+            val manager = QemuRuntimeManager(this)
+            val result = try {
+                runCatching {
                 val sessionId = "ls_runtime_probe"
                 val deadline = System.currentTimeMillis() + 180_000
                 val mount = manager.handle(request(sessionId, GuestOperation.SESSION_MOUNT, JSONObject(), deadline))
@@ -48,6 +49,20 @@ class RuntimeProbeActivity : Activity() {
                 check(sharedRead.payload.getString("content") == sharedContent) {
                     "sessions did not observe the same workspace"
                 }
+                val exported = manager.handle(
+                    request(
+                        secondSessionId,
+                        GuestOperation.ARTIFACT_EXPORT,
+                        JSONObject().put("path", "cross-session-proof.txt")
+                            .put("offset", 0).put("limit", 256 * 1024),
+                        deadline,
+                    )
+                )
+                check(exported.status == "success") { exported.message ?: "artifact export failed" }
+                check(
+                    Base64.decode(exported.payload.getString("content_base64"), Base64.DEFAULT)
+                        .toString(Charsets.UTF_8) == sharedContent
+                ) { "artifact export content mismatch" }
                 val command = intent.getStringExtra("command_b64")?.let {
                     Base64.decode(it, Base64.DEFAULT).toString(Charsets.UTF_8)
                 } ?: intent.getStringExtra("command") ?: DEFAULT_COMMAND
@@ -66,13 +81,22 @@ class RuntimeProbeActivity : Activity() {
                             .put("content", sharedRead.payload.getString("content"))
                             .put("same_vm_workspace", true),
                     )
+                    .put("artifact_export", exported.payload)
                     .put("execution", execution.payload)
                     .put("health", health.payload)
                     .toString()
-            }.fold({ it }, { JSONObject().put("error", it.stackTraceToString()).toString() })
+                }.fold({ it }, { JSONObject().put("error", it.stackTraceToString()).toString() })
+            } finally {
+                manager.shutdown()
+            }
             File(filesDir, "probe-result.json").writeText(result)
             Log.i(TAG, result)
-            runOnUiThread { finish() }
+            // This debug Activity shares the dedicated :qemu process with the
+            // production Binder service. End the probe process after persisting
+            // its result so no native Limbo/QEMU singleton or disk lock can leak
+            // into a subsequent app run.
+            runOnUiThread { finishAndRemoveTask() }
+            android.os.Process.killProcess(android.os.Process.myPid())
         }.start()
     }
 
