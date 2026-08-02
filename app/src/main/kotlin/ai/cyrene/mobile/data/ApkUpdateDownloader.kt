@@ -20,24 +20,24 @@ object ApkUpdateDownloader {
     suspend fun download(
         context: Context,
         release: GithubRelease,
+        asset: GithubApkAsset,
         onProgress: (ApkDownloadProgress) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         val downloadsRoot = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
             ?: File(context.filesDir, "downloads")
-        val apkUrl = release.apkUrl ?: throw IOException("Release does not include an APK")
         val updateDirectory = File(
             downloadsRoot,
             "updates",
         ).apply { mkdirs() }
-        val safeName = release.apkName
-            ?.replace(Regex("""[^A-Za-z0-9._-]"""), "_")
-            ?.takeIf { it.endsWith(".apk", ignoreCase = true) }
+        val safeName = asset.name
+            .replace(Regex("""[^A-Za-z0-9._-]"""), "_")
+            .takeIf { it.endsWith(".apk", ignoreCase = true) }
             ?: "cyrene-mobile-${release.version.replace(Regex("""[^A-Za-z0-9._-]"""), "_")}.apk"
         val destination = File(updateDirectory, safeName)
         val partial = File(updateDirectory, "$safeName.part")
         partial.delete()
 
-        val connection = (URL(apkUrl).openConnection() as HttpURLConnection).apply {
+        val connection = (URL(asset.url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             instanceFollowRedirects = true
             connectTimeout = 15_000

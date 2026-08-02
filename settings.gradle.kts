@@ -16,3 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "CyreneMobile"
 include(":app")
+include(":runtime-protocol")
+include(":runtime-app")

@@ -27,9 +27,16 @@ import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -38,6 +45,18 @@ data class PairingOffer(
     val response: String,
     val expiresAt: String,
 )
+
+internal fun parseProtocolInstant(value: String): Instant =
+    if (value.endsWith("Z", ignoreCase = true)) {
+        Instant.parse(value)
+    } else {
+        OffsetDateTime.parse(value).toInstant()
+    }
+
+internal fun directControlPortCandidates(savedPort: Int): List<Int> =
+    (listOf(savedPort) + (37940 downTo 37841))
+        .filter { it in 1..65535 }
+        .distinct()
 
 class CyreneClient(
     private val identity: MobileIdentity,
@@ -61,7 +80,9 @@ class CyreneClient(
             text(R.string.error_invalid_pair_invite)
         }
         val expiresAt = invitation.getString("expires_at")
-        require(Instant.parse(expiresAt).isAfter(Instant.now())) { text(R.string.error_pair_key_expired) }
+        require(parseProtocolInstant(expiresAt).isAfter(Instant.now())) {
+            text(R.string.error_pair_key_expired)
+        }
         val device = invitation.getJSONObject("device")
         val signingPublic = device.getString("signing_public_key")
         val signingBytes = b64UrlDecode(signingPublic)
@@ -143,6 +164,7 @@ class CyreneClient(
         projectId: String = "",
         payload: JSONObject = JSONObject(),
         timeoutSeconds: Long = 40,
+        idempotencyKey: String? = null,
     ): JSONObject {
         ensureLegacyListener(peer)
         val requestId = "request_" + UUID.randomUUID().toString().replace("-", "")
@@ -152,7 +174,9 @@ class CyreneClient(
             .put("project_id", projectId)
             .put(
                 "idempotency_key",
-                if (command in SIDE_EFFECTS) {
+                if (!idempotencyKey.isNullOrBlank()) {
+                    idempotencyKey
+                } else if (command in SIDE_EFFECTS || command.startsWith("local.")) {
                     "idem_${identity.deviceId.takeLast(8)}_${UUID.randomUUID().toString().replace("-", "")}"
                 } else "",
             )
@@ -187,6 +211,35 @@ class CyreneClient(
         }
         return result
     }
+
+    /**
+     * Recover from a desktop listener fallback changing after a restart.
+     *
+     * The listener can move within the documented 37841..37940 range when
+     * another Cyrene process owns the saved port. A successful encrypted
+     * capabilities command proves that the endpoint owns the paired identity;
+     * an unrelated open port can therefore never replace the trusted peer.
+     */
+    suspend fun recoverEndpoint(peer: Peer): Peer = withContext(Dispatchers.IO) {
+        var lastError: Throwable? = null
+        for (port in directControlPortCandidates(peer.port)) {
+            if (!tcpReachable(peer.host, port)) continue
+            val candidate = if (port == peer.port) peer else peer.copy(port = port)
+            val verified = runCatching {
+                command(candidate, "capabilities.read", timeoutSeconds = 5)
+            }.onFailure { lastError = it }.isSuccess
+            if (verified) return@withContext candidate
+        }
+        throw lastError ?: IllegalStateException(
+            "Failed to connect to /${peer.host}:${peer.port}",
+        )
+    }
+
+    private fun tcpReachable(host: String, port: Int): Boolean = runCatching {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(host, port), 180)
+        }
+    }.isSuccess
 
     private fun decodeResponse(peer: Peer, envelope: JSONObject, requestId: String): JSONObject {
         val (kind, payload) = EnvelopeCodec.decode(identity, peer, envelope) { id -> text(id) }
@@ -232,26 +285,60 @@ class CyreneClient(
         body: JSONObject,
         timeoutSeconds: Int = 35,
     ): HttpResult = withContext(Dispatchers.IO) {
-        val renderedHost = if (host.contains(":")) "[$host]" else host
-        val connection = URL("http://$renderedHost:$port$path").openConnection() as HttpURLConnection
-        connection.instanceFollowRedirects = false
-        connection.requestMethod = "POST"
-        connection.connectTimeout = 5_000
-        connection.readTimeout = timeoutSeconds * 1_000
-        connection.doOutput = true
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.setRequestProperty("Cache-Control", "no-store")
-        val bytes = body.toString().toByteArray()
-        connection.setFixedLengthStreamingMode(bytes.size)
-        connection.outputStream.use { it.write(bytes) }
-        val status = connection.responseCode
-        val stream = if (status in 200..399) connection.inputStream else connection.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        connection.disconnect()
-        HttpResult(status, runCatching { JSONObject(text) }.getOrElse { JSONObject() })
+        try {
+            val renderedHost = if (host.contains(":")) "[$host]" else host
+            val connection = URL("http://$renderedHost:$port$path").openConnection() as HttpURLConnection
+            try {
+                connection.instanceFollowRedirects = false
+                connection.requestMethod = "POST"
+                connection.connectTimeout = 5_000
+                connection.readTimeout = timeoutSeconds * 1_000
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setRequestProperty("Cache-Control", "no-store")
+                val bytes = body.toString().toByteArray()
+                connection.setFixedLengthStreamingMode(bytes.size)
+                connection.outputStream.use { it.write(bytes) }
+                val status = connection.responseCode
+                val stream = if (status in 200..399) connection.inputStream else connection.errorStream
+                val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                HttpResult(status, runCatching { JSONObject(responseText) }.getOrElse { JSONObject() })
+            } finally {
+                connection.disconnect()
+            }
+        } catch (error: Exception) {
+            throw IllegalStateException(mapNetworkError(host, port, error), error)
+        }
+    }
+
+    private fun mapNetworkError(host: String, port: Int, error: Exception): String {
+        val detail = error.message.orEmpty().lowercase()
+        return when {
+            error is NoRouteToHostException ||
+                detail.contains("network is unreachable") ||
+                detail.contains("no route to host") ->
+                text(R.string.error_network_unreachable, host, port)
+            error is SocketTimeoutException ->
+                text(R.string.error_connection_timeout, host, port)
+            error is ConnectException || detail.contains("connection refused") ->
+                text(R.string.error_connection_refused, host, port)
+            error is UnknownHostException ->
+                text(R.string.error_unknown_host, host)
+            else -> text(R.string.error_connection_detail, host, port, error.message.orEmpty())
+        }
     }
 
     private fun mapHttpError(result: HttpResult): String = when (result.status) {
+        400 -> {
+            val detail = result.body.optString("error").lowercase()
+            when {
+                detail.contains("pairing") &&
+                    (detail.contains("invalid") || detail.contains("expired") ||
+                        detail.contains("already") || detail.contains("used")) ->
+                    text(R.string.error_pair_key_invalid_or_expired)
+                else -> text(R.string.error_http_bad_request)
+            }
+        }
         403 -> text(R.string.error_http_forbidden)
         404 -> text(R.string.error_http_not_found)
         409 -> text(R.string.error_http_conflict)

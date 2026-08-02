@@ -8,6 +8,12 @@ import ai.cyrene.mobile.data.CachedProjectData
 import ai.cyrene.mobile.data.DesktopDataCache
 import ai.cyrene.mobile.data.DesktopDataSnapshot
 import ai.cyrene.mobile.data.SecureStore
+import ai.cyrene.mobile.localagent.database.LocalAgentDatabase
+import ai.cyrene.mobile.localagent.database.LocalSessionEntity
+import ai.cyrene.mobile.localagent.model.RunState
+import ai.cyrene.mobile.localagent.runtime.RunSnapshot
+import ai.cyrene.mobile.localagent.service.LocalAgentForegroundService
+import ai.cyrene.mobile.localagent.service.LocalRunSupervisor
 import ai.cyrene.mobile.network.CyreneClient
 import ai.cyrene.mobile.network.PairingOffer
 import ai.cyrene.mobile.protocol.Peer
@@ -34,6 +40,8 @@ import java.time.Instant
 import java.util.Base64
 import java.util.UUID
 
+internal const val LOCAL_PROJECT_ID = "mobile:local"
+
 data class MobileUiState(
     val peer: Peer? = null,
     val peers: List<Peer> = emptyList(),
@@ -42,6 +50,7 @@ data class MobileUiState(
     val creatingChat: Boolean = false,
     val backgroundSyncing: Boolean = false,
     val backgroundSyncProgress: Float = 0f,
+    val desktopConnected: Boolean = false,
     val error: String? = null,
     val status: String = "",
     val projects: List<JSONObject> = emptyList(),
@@ -89,6 +98,7 @@ data class MobileUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SecureStore(application)
     private val desktopDataCache = DesktopDataCache(application)
+    private val localAgentDao = LocalAgentDatabase.open(application).dao()
     private val identity = store.identity()
     private val client = CyreneClient(
         identity,
@@ -97,6 +107,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private fun text(id: Int, vararg args: Any): String =
         getApplication<Application>().getString(id, *args)
+
+    private fun localProject() = JSONObject()
+        .put("id", LOCAL_PROJECT_ID)
+        .put("name", text(R.string.local_project_name))
+        .put("status", "local")
+        .put("local", true)
+
+    private fun isLocalProject(project: JSONObject?) =
+        project?.optString("id") == LOCAL_PROJECT_ID
+
+    private fun withLocalProject(projects: List<JSONObject>): List<JSONObject> =
+        listOf(localProject()) + projects.filterNot(::isLocalProject)
 
     private fun initialState(
         peer: Peer? = null,
@@ -109,6 +131,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         uiTheme = store.uiTheme(),
         uiLanguage = store.uiLanguage(),
         permissionMode = store.permissionMode(),
+        desktopModels = store.localModelConfigurationPublic(),
+        projects = listOf(localProject()),
+        selectedProject = if (peer == null) localProject() else null,
+        projectChats = mapOf(LOCAL_PROJECT_ID to emptyList()),
     )
 
     private val _state = MutableStateFlow(initialState(store.peer()))
@@ -122,13 +148,299 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalPrompt = "$"
     private var deviceLoadJob: Job? = null
     private var backgroundSyncJob: Job? = null
+    private var localChatObservationJob: Job? = null
     private val cacheMutex = Mutex()
     @Volatile
     private var cachedData = DesktopDataSnapshot()
 
     init {
+        refreshLocalSessions()
         _state.value.peer?.let(::restoreCacheAndRefresh)
     }
+
+    private fun refreshLocalSessions(selectLocalWhenUnpaired: Boolean = true) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val sessions = localAgentDao.sessions()
+                val chats = sessions.map { localSessionJson(it, includeMessages = false) }
+                val current = _state.value
+                val selectedLocal = isLocalProject(current.selectedProject)
+                val selectedProject = when {
+                    selectedLocal -> localProject()
+                    current.selectedProject == null && current.peer == null && selectLocalWhenUnpaired -> localProject()
+                    else -> current.selectedProject
+                }
+                _state.value = current.copy(
+                    projects = withLocalProject(current.projects),
+                    selectedProject = selectedProject,
+                    projectChats = current.projectChats + (LOCAL_PROJECT_ID to chats),
+                    chats = if (selectedLocal || selectedProject?.optString("id") == LOCAL_PROJECT_ID) {
+                        chats
+                    } else {
+                        current.chats
+                    },
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    error = error.message ?: text(R.string.local_agent_unavailable),
+                )
+            }
+        }
+    }
+
+    private suspend fun localSessionJson(
+        session: LocalSessionEntity,
+        includeMessages: Boolean,
+    ): JSONObject {
+        val messages = localAgentDao.messages(session.sessionId, if (includeMessages) 500 else 1)
+        val latestRun = localAgentDao.latestRun(session.sessionId)
+        val updatedAt = session.updatedAt.toLongOrNull() ?: 0L
+        val createdAt = session.createdAt.toLongOrNull() ?: updatedAt
+        return JSONObject()
+            .put("id", session.sessionId)
+            .put("title", session.title)
+            .put("project_id", LOCAL_PROJECT_ID)
+            .put("local", true)
+            .put("status", localRunStatus(latestRun))
+            .put("message_count", if (includeMessages) messages.size else localAgentDao.messageCount(session.sessionId))
+            .put("preview", messages.lastOrNull()?.content.orEmpty())
+            .put("createdAt", epochMillisAsIso(createdAt))
+            .put("updatedAt", epochMillisAsIso(updatedAt))
+            .put("execution_target", session.executionTarget)
+            .also { chat ->
+                if (includeMessages) chat.put(
+                    "messages",
+                    JSONArray(localConversationTimeline(session.sessionId, messages, latestRun)),
+                )
+            }
+    }
+
+    private suspend fun localConversationTimeline(
+        sessionId: String,
+        messages: List<ai.cyrene.mobile.localagent.database.LocalMessageEntity>,
+        latestRun: RunSnapshot?,
+    ): List<JSONObject> {
+        val timeline = messages.map { message ->
+            JSONObject()
+                .put("id", message.messageId)
+                .put("role", message.role)
+                .put("content", message.content)
+                .put("createdAt", epochMillisAsIso(message.createdAt.toLongOrNull() ?: 0L))
+                .put("timelineEpochMs", message.createdAt.toLongOrNull() ?: 0L)
+        }.toMutableList()
+        val traces = localAgentDao.traces(sessionId, 500).asReversed()
+        val activities = linkedMapOf<String, JSONObject>()
+        val callTurns = mutableMapOf<String, String>()
+        val intermediate = mutableListOf<JSONObject>()
+        fun activity(turnId: String, trace: ai.cyrene.mobile.localagent.database.LocalTraceEntity) =
+            activities.getOrPut(turnId) {
+                JSONObject()
+                    .put("id", "activity_$turnId")
+                    .put("role", "assistant")
+                    .put("content", "")
+                    .put("activityCard", true)
+                    .put("trace", JSONArray())
+                    .put("reasoning", "")
+                    .put("provider", localProviderName())
+                    .put("runId", trace.runId.orEmpty())
+                    .put("createdAt", epochMillisAsIso(trace.createdAt.toLongOrNull() ?: 0L))
+                    .put("timelineEpochMs", trace.createdAt.toLongOrNull() ?: 0L)
+            }
+        traces.forEach { trace ->
+            val raw = runCatching { JSONObject(trace.payloadJson) }.getOrNull() ?: return@forEach
+            if (trace.type == "model_event") {
+                val turnId = raw.optString("model_turn_id").ifBlank { return@forEach }
+                val eventType = raw.optString("type")
+                val payload = raw.optJSONObject("payload") ?: JSONObject()
+                val card = activity(turnId, trace)
+                when (eventType) {
+                    "reasoning.status" -> {
+                        val delta = payload.optString("delta").ifBlank {
+                            payload.optString("content").ifBlank { payload.optString("text") }
+                        }
+                        if (delta.isNotBlank()) card.put("reasoning", card.optString("reasoning") + delta)
+                    }
+                    "tool_call.started", "tool_call.completed" -> {
+                        val callId = payload.optString("call_id")
+                        if (callId.isNotBlank()) callTurns[callId] = turnId
+                        localTraceEntry(trace)?.let { card.getJSONArray("trace").put(it) }
+                    }
+                    "message.completed" -> if (card.getJSONArray("trace").length() > 0) {
+                        val content = payload.optString("content")
+                        if (content.isNotBlank()) intermediate += JSONObject()
+                            .put("id", "intermediate_${turnId}_${trace.createdAt}")
+                            .put("role", "assistant")
+                            .put("content", content)
+                            .put("createdAt", epochMillisAsIso(trace.createdAt.toLongOrNull() ?: 0L))
+                            .put("timelineEpochMs", trace.createdAt.toLongOrNull() ?: 0L)
+                    }
+                }
+            } else if (trace.type == "tool_result") {
+                val callId = raw.optString("call_id")
+                val turnId = callTurns[callId] ?: return@forEach
+                localTraceEntry(trace)?.let { activities[turnId]?.getJSONArray("trace")?.put(it) }
+            }
+        }
+        activities.values.forEach { card ->
+            if (card.getJSONArray("trace").length() == 0 && card.optString("reasoning").isBlank()) return@forEach
+            card.put(
+                "runtimeActivityActive",
+                card.optString("runId") == latestRun?.runId && isLocalRunActive(latestRun),
+            ).remove("runId")
+            timeline += card
+        }
+        timeline += intermediate
+        return timeline.sortedWith(
+            compareBy<JSONObject> { it.optLong("timelineEpochMs") }
+                .thenBy { if (it.optBoolean("activityCard")) 1 else 0 },
+        ).onEach { it.remove("timelineEpochMs") }
+    }
+
+    private fun localProviderName(): String = store.localModelConfigurationPublic()
+        ?.optJSONArray("custom_models")?.optJSONObject(0)
+        ?.optString("provider").orEmpty()
+
+    private fun localTraceEntry(trace: ai.cyrene.mobile.localagent.database.LocalTraceEntity): JSONObject? {
+        val raw = runCatching { JSONObject(trace.payloadJson) }.getOrNull() ?: return null
+        if (trace.type == "model_event") {
+            val eventType = raw.optString("type")
+            val payload = raw.optJSONObject("payload") ?: JSONObject()
+            if (eventType !in setOf("tool_call.started", "tool_call.completed")) return null
+            if (payload.optString("name") in setOf(
+                    "use_tools", "quit", "send_message", "update_plan_progress",
+                )
+            ) return null
+            val entry = JSONObject()
+                .put("type", eventType)
+                .put("toolCallId", payload.optString("call_id"))
+                .put("tool", payload.optString("name"))
+                .put("status", if (eventType.endsWith("started")) "running" else "completed")
+            payload.optString("arguments_json").takeIf(String::isNotBlank)?.let { arguments ->
+                runCatching { JSONObject(arguments) }.getOrNull()?.let { entry.put("args", it) }
+            }
+            return entry
+        }
+        if (trace.type == "tool_result") {
+            val inline = raw.optString("inline_payload")
+            val detail = runCatching { JSONObject(inline) }.getOrNull()
+            val preview = detail?.optString("command").orEmpty().ifBlank {
+                detail?.optString("stdout").orEmpty().lineSequence().firstOrNull().orEmpty()
+            }.ifBlank { raw.optString("summary") }
+            return JSONObject()
+                .put("type", "tool_result")
+                .put("toolCallId", raw.optString("call_id"))
+                .put("status", raw.optString("status"))
+                .put("result_preview", preview.take(240))
+                .put("failed", raw.optString("status") !in setOf("success", "completed"))
+        }
+        return null
+    }
+
+    private fun localRunStatus(run: RunSnapshot?): String = when {
+        run == null -> "ready"
+        run.state == RunState.COMPLETED -> {
+            if (run.stopReason?.wireName == "cancelled") "cancelled" else "completed"
+        }
+        run.state == RunState.FAILED -> "failed"
+        !LocalRunSupervisor.isRunning(run.runId) -> "paused"
+        else -> "running"
+    }
+
+    private fun isLocalRunActive(run: RunSnapshot?) =
+        run != null &&
+            run.state !in setOf(RunState.COMPLETED, RunState.FAILED) &&
+            LocalRunSupervisor.isRunning(run.runId)
+
+    private fun epochMillisAsIso(value: Long): String =
+        Instant.ofEpochMilli(value.coerceAtLeast(0L)).toString()
+
+    private suspend fun loadLocalProject(resetSelection: Boolean) {
+        localChatObservationJob?.cancel()
+        val chats = localAgentDao.sessions().map { localSessionJson(it, includeMessages = false) }
+        val current = _state.value
+        val selectedChat = current.selectedChat?.takeIf { selected ->
+            !resetSelection && chats.any { it.optString("id") == selected.optString("id") }
+        }
+        _state.value = current.copy(
+            projects = withLocalProject(current.projects),
+            selectedProject = localProject(),
+            projectChats = current.projectChats + (LOCAL_PROJECT_ID to chats),
+            projectTasks = current.projectTasks + (LOCAL_PROJECT_ID to emptyList()),
+            chats = chats,
+            tasks = emptyList(),
+            selectedChat = selectedChat,
+            selectedTask = null,
+            runEvents = if (resetSelection) emptyList() else current.runEvents,
+            activeRunId = if (selectedChat == null) null else current.activeRunId,
+            status = text(R.string.local_agent_device_only),
+        )
+        selectedChat?.optString("id")?.takeIf(String::isNotBlank)?.let { sessionId ->
+            loadLocalChat(sessionId, clearEvents = false)
+            observeLocalChat(sessionId)
+        }
+    }
+
+    private suspend fun loadLocalChat(sessionId: String, clearEvents: Boolean) {
+        val session = localAgentDao.session(sessionId) ?: return
+        val detail = localSessionJson(session, includeMessages = true)
+        val run = localAgentDao.latestRun(sessionId)
+        val traces = localAgentDao.traces(sessionId, 50)
+        val runEvents = if (run?.state == RunState.FAILED) {
+            val failure = traces.firstOrNull { it.type == "run_failed" }
+            listOf(
+                JSONObject()
+                    .put("type", "error")
+                    .put(
+                        "message",
+                        failure?.let {
+                            runCatching { JSONObject(it.payloadJson).optString("message") }.getOrNull()
+                        }.orEmpty().ifBlank { text(R.string.chat_run_failed) },
+                    ),
+            )
+        } else if (clearEvents) {
+            emptyList()
+        } else {
+            _state.value.runEvents.filterNot { it.optString("type") == "error" }
+        }
+        val summaries = localAgentDao.sessions().map { localSessionJson(it, includeMessages = false) }
+        val current = _state.value
+        if (!isLocalProject(current.selectedProject) || current.selectedChat?.optString("id")
+                ?.takeIf(String::isNotBlank)?.let { it != sessionId } == true
+        ) return
+        val activeRunId = when {
+            isLocalRunActive(run) -> run?.runId
+            run == null -> current.activeRunId
+            else -> null
+        }
+        _state.value = current.copy(
+            selectedChat = detail,
+            projectChats = current.projectChats + (LOCAL_PROJECT_ID to summaries),
+            chats = summaries,
+            activeRunId = activeRunId,
+            runEvents = runEvents,
+            status = when {
+                run?.state == RunState.FAILED -> text(R.string.status_run_failed)
+                activeRunId != null -> text(R.string.status_agent_running)
+                run?.state == RunState.COMPLETED -> text(R.string.status_run_completed)
+                else -> text(R.string.local_agent_device_only)
+            },
+        )
+    }
+
+    private fun observeLocalChat(sessionId: String) {
+        localChatObservationJob?.cancel()
+        localChatObservationJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive && isLocalProject(_state.value.selectedProject) &&
+                _state.value.selectedChat?.optString("id") == sessionId
+            ) {
+                loadLocalChat(sessionId, clearEvents = false)
+                delay(500)
+            }
+        }
+    }
+
+    private fun localExecutionTarget() =
+        "mobile:${identity.fingerprint.replace(" ", "")}"
 
     private fun restoreCacheAndRefresh(peer: Peer) {
         deviceLoadJob = viewModelScope.launch(Dispatchers.IO) {
@@ -140,17 +452,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ensureCurrentPeer(peer)
             _state.value = _state.value.copy(
                 busy = true,
+                desktopConnected = false,
                 error = null,
                 status = text(R.string.status_syncing_projects),
             )
-            runCatching { loadProjects(peer) }
-                .onSuccess { startBackgroundSync(peer) }
+            var activePeer = peer
+            runCatching {
+                activePeer = adoptRecoveredPeer(peer, client.recoverEndpoint(peer))
+                loadProjects(activePeer)
+            }
+                .onSuccess { startBackgroundSync(activePeer) }
                 .onFailure { error ->
                     if (error !is CancellationException &&
                         _state.value.peer?.deviceId == peer.deviceId
                     ) {
                         _state.value = _state.value.copy(
-                            error = error.message ?: text(R.string.error_generic),
+                            // Automatic desktop refresh must not block the local conversation UI.
+                            // The cached remote projects remain available and Device shows the
+                            // connection state when the user wants to troubleshoot it.
+                            error = null,
+                            desktopConnected = false,
                             status = if (cachedData.projects.isEmpty()) {
                                 text(R.string.status_need_attention)
                             } else {
@@ -264,19 +585,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 status = text(R.string.status_loading_settings),
             )
             runCatching {
-                client.command(requirePeer(), "settings.read")
+                val peer = requirePeer()
+                val result = client.command(peer, "settings.read")
+                copyDesktopModelsToLocal(peer)
+                result
             }.onSuccess { result ->
                 _state.value = _state.value.copy(
                     desktopSettings = result.optJSONObject("settings") ?: JSONObject(),
                     desktopSettingsSchema = result.optJSONObject("schema"),
-                    desktopModels = result.optJSONObject("models"),
+                    desktopModels = store.localModelConfigurationPublic()
+                        ?: result.optJSONObject("models"),
                     status = text(R.string.status_settings_loaded),
                 )
             }.onFailure {
                 _state.value = _state.value.copy(
                     desktopSettings = null,
                     desktopSettingsSchema = null,
-                    desktopModels = null,
+                    desktopModels = store.localModelConfigurationPublic(),
                     status = text(R.string.status_settings_unavailable),
                 )
             }
@@ -301,17 +626,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateDesktopModels(models: JSONObject) =
         launchBusy(text(R.string.status_saving_models)) {
+            val localModels = mergeLocalModelSecrets(models, store.localModelConfiguration())
+            store.saveLocalModelConfiguration(localModels)
+            _state.value = _state.value.copy(
+                desktopModels = store.localModelConfigurationPublic(),
+                status = text(R.string.status_local_models_saved),
+            )
+            val peer = _state.value.peer ?: return@launchBusy
             val result = client.command(
-                requirePeer(),
+                peer,
                 "settings.update",
-                payload = JSONObject().put("models", models),
+                payload = JSONObject().put("models", localModels),
             )
             _state.value = _state.value.copy(
                 desktopSettings = result.optJSONObject("settings")
                     ?: _state.value.desktopSettings,
                 desktopSettingsSchema = result.optJSONObject("schema")
                     ?: _state.value.desktopSettingsSchema,
-                desktopModels = result.optJSONObject("models")
+                desktopModels = store.localModelConfigurationPublic()
+                    ?: result.optJSONObject("models")
                     ?: _state.value.desktopModels,
                 status = text(R.string.status_models_saved),
             )
@@ -408,36 +741,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshProjects() = launchBusy(text(R.string.status_syncing_projects)) {
-        val peer = requirePeer()
+        _state.value = _state.value.copy(desktopConnected = false)
+        val current = requirePeer()
+        val peer = adoptRecoveredPeer(current, client.recoverEndpoint(current))
         loadProjects(peer)
         startBackgroundSync(peer)
+    }
+
+    private fun adoptRecoveredPeer(expected: Peer, recovered: Peer): Peer {
+        ensureCurrentPeer(expected)
+        if (expected.host == recovered.host && expected.port == recovered.port) return expected
+        store.savePeer(recovered)
+        _state.value = _state.value.copy(
+            peer = recovered,
+            peers = store.peers(),
+        )
+        return recovered
     }
 
     private suspend fun loadProjects(peer: Peer) {
         val result = client.command(peer, "projects.list")
         ensureCurrentPeer(peer)
-        val projects = result.optJSONArray("projects").objects()
-        updateCache(peer.deviceId) { previous -> previous.copy(projects = projects) }
+        // A successful desktop connection is also the hand-off point for the
+        // provider configuration used by device-local conversations. Keep this
+        // best-effort so an older desktop can still serve remote projects, but
+        // never require the user to visit Settings just to trigger the copy.
+        copyDesktopModelsToLocal(peer)
+        val remoteProjects = result.optJSONArray("projects").objects()
+        val projects = withLocalProject(remoteProjects)
+        updateCache(peer.deviceId) { previous -> previous.copy(projects = remoteProjects) }
         val previousProjectId = _state.value.selectedProject?.optString("id").orEmpty()
         val selectedProject = projects.firstOrNull {
             it.optString("id") == previousProjectId
-        } ?: projects.firstOrNull()
+        } ?: remoteProjects.firstOrNull() ?: projects.firstOrNull()
         val projectChanged = selectedProject?.optString("id").orEmpty() != previousProjectId
         _state.value = _state.value.copy(
             projects = projects,
+            desktopConnected = true,
             selectedProject = selectedProject,
             selectedChat = if (projectChanged) null else _state.value.selectedChat,
             selectedTask = if (projectChanged) null else _state.value.selectedTask,
             chats = if (selectedProject == null) emptyList() else _state.value.chats,
             tasks = if (selectedProject == null) emptyList() else _state.value.tasks,
-            status = text(R.string.status_online_projects, projects.size),
+            status = text(R.string.status_online_projects, remoteProjects.size),
         )
         if (selectedProject != null) {
-            loadProjectContent(peer, selectedProject, resetSelection = projectChanged)
+            if (isLocalProject(selectedProject)) {
+                loadLocalProject(resetSelection = projectChanged)
+            } else {
+                loadProjectContent(peer, selectedProject, resetSelection = projectChanged)
+            }
         }
     }
 
+    private suspend fun copyDesktopModelsToLocal(peer: Peer): Boolean {
+        ensureCurrentPeer(peer)
+        val models = runCatching {
+            client.command(peer, "settings.models.copy").optJSONObject("models")
+        }.getOrNull() ?: return false
+        ensureCurrentPeer(peer)
+        store.saveLocalModelConfiguration(models)
+        _state.value = _state.value.copy(
+            desktopModels = store.localModelConfigurationPublic(),
+        )
+        return true
+    }
+
     fun selectProject(project: JSONObject) {
+        if (isLocalProject(project)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                loadLocalProject(resetSelection = true)
+            }
+            return
+        }
+        localChatObservationJob?.cancel()
         val projectId = project.optString("id")
         val cached = cachedData.projectData[projectId]
         if (cached != null) {
@@ -452,6 +829,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshProjectContent() {
         val project = _state.value.selectedProject ?: return
+        if (isLocalProject(project)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                loadLocalProject(resetSelection = false)
+            }
+            return
+        }
         launchBusy(text(R.string.status_refreshing_project)) {
             loadProjectContent(requirePeer(), project, resetSelection = false)
         }
@@ -505,6 +888,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshProjectInBackground(project: JSONObject) {
+        if (isLocalProject(project)) return
         val peer = _state.value.peer ?: return
         launchTrackedRefresh(peer) {
             loadProjectContent(peer, project, resetSelection = false)
@@ -512,6 +896,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showChatList() {
+        localChatObservationJob?.cancel()
         _state.value = _state.value.copy(
             selectedChat = null,
             runEvents = emptyList(),
@@ -528,13 +913,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         message: String,
         permissionMode: PermissionMode,
         attachments: List<PendingAttachment> = emptyList(),
-    ) {
-        if (_state.value.creatingChat) return
+    ): Boolean {
+        if (_state.value.creatingChat) return false
         val content = message.trim()
-        if (content.isBlank()) return
-        val peer = _state.value.peer ?: return
+        if (content.isBlank()) return false
         val projectId = _state.value.selectedProject?.optString("id").orEmpty()
-        if (projectId.isBlank()) return
+        if (projectId.isBlank()) return false
+        if (projectId == LOCAL_PROJECT_ID) {
+            return createLocalChatAndSend(content, attachments)
+        }
+        val peer = _state.value.peer ?: return false
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = _state.value.copy(
                 creatingChat = true,
@@ -582,14 +970,124 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(creatingChat = false)
             }
         }
+        return true
+    }
+
+    private fun createLocalChatAndSend(
+        content: String,
+        attachments: List<PendingAttachment>,
+    ): Boolean {
+        if (attachments.isNotEmpty()) {
+            _state.value = _state.value.copy(error = text(R.string.local_agent_attachments_unsupported))
+            return false
+        }
+        if (!store.hasRunnableLocalModel()) {
+            _state.value = _state.value.copy(error = text(R.string.local_agent_model_required))
+            return false
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _state.value = _state.value.copy(
+                creatingChat = true,
+                error = null,
+                status = text(R.string.status_sending_agent),
+            )
+            runCatching {
+                val sessionId = "ls_${UUID.randomUUID().toString().replace("-", "")}"
+                val title = content.lineSequence().firstOrNull()
+                    ?.trim()?.take(40).orEmpty()
+                    .ifBlank { text(R.string.local_agent_default_title) }
+                localAgentDao.putSession(
+                    LocalSessionEntity(
+                        sessionId = sessionId,
+                        title = title,
+                        executionTarget = localExecutionTarget(),
+                    ),
+                )
+                loadLocalProject(resetSelection = true)
+                loadLocalChat(sessionId, clearEvents = true)
+                val runId = "run_${UUID.randomUUID().toString().replace("-", "")}"
+                updateLocalUserMessage(
+                    chatId = sessionId,
+                    messageId = "pending_$runId",
+                    content = content,
+                    deliveryState = "sending",
+                )
+                _state.value = _state.value.copy(
+                    activeRunId = runId,
+                    status = text(R.string.status_agent_running),
+                )
+                LocalAgentForegroundService.startRun(
+                    getApplication(), runId, title, sessionId, 1L, content,
+                )
+                observeLocalChat(sessionId)
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    error = error.message ?: text(R.string.local_agent_unavailable),
+                    activeRunId = null,
+                    status = text(R.string.status_need_attention),
+                )
+            }
+            _state.value = _state.value.copy(creatingChat = false)
+        }
+        return true
+    }
+
+    private fun sendLocalMessage(
+        chat: JSONObject,
+        content: String,
+        attachments: List<PendingAttachment>,
+    ) {
+        if (content.isBlank()) return
+        if (attachments.isNotEmpty()) {
+            _state.value = _state.value.copy(error = text(R.string.local_agent_attachments_unsupported))
+            return
+        }
+        if (!store.hasRunnableLocalModel()) {
+            _state.value = _state.value.copy(error = text(R.string.local_agent_model_required))
+            return
+        }
+        if (_state.value.activeRunId != null) return
+        val sessionId = chat.optString("id")
+        val runId = "run_${UUID.randomUUID().toString().replace("-", "")}"
+        updateLocalUserMessage(
+            chatId = sessionId,
+            messageId = "pending_$runId",
+            content = content,
+            deliveryState = "sending",
+        )
+        _state.value = _state.value.copy(
+            activeRunId = runId,
+            runEvents = emptyList(),
+            error = null,
+            status = text(R.string.status_agent_running),
+        )
+        LocalAgentForegroundService.startRun(
+            getApplication(), runId, chat.optString("title"), sessionId, 1L, content,
+        )
+        observeLocalChat(sessionId)
     }
 
     fun renameChat(project: JSONObject, chat: JSONObject, requestedTitle: String) {
-        val peer = _state.value.peer ?: return
         val projectId = project.optString("id")
         val chatId = chat.optString("id")
         val title = requestedTitle.trim()
         if (projectId.isBlank() || chatId.isBlank() || title.isBlank()) return
+        if (projectId == LOCAL_PROJECT_ID) {
+            viewModelScope.launch(Dispatchers.IO) {
+                _state.value = _state.value.copy(busy = true, error = null)
+                runCatching {
+                    check(localAgentDao.renameSession(chatId, title) == 1)
+                    loadLocalProject(resetSelection = false)
+                }.onFailure { error ->
+                    _state.value = _state.value.copy(
+                        error = error.message ?: text(R.string.error_generic),
+                    )
+                }
+                _state.value = _state.value.copy(busy = false)
+            }
+            return
+        }
+        val peer = _state.value.peer ?: return
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = _state.value.copy(busy = true, error = null)
             runCatching {
@@ -632,10 +1130,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteChat(project: JSONObject, chat: JSONObject) {
-        val peer = _state.value.peer ?: return
         val projectId = project.optString("id")
         val chatId = chat.optString("id")
         if (projectId.isBlank() || chatId.isBlank()) return
+        if (projectId == LOCAL_PROJECT_ID) {
+            viewModelScope.launch(Dispatchers.IO) {
+                _state.value = _state.value.copy(busy = true, error = null)
+                runCatching {
+                    localChatObservationJob?.cancel()
+                    check(localAgentDao.deleteSession(chatId) == 1)
+                    loadLocalProject(resetSelection = true)
+                }.onFailure { error ->
+                    _state.value = _state.value.copy(
+                        error = error.message ?: text(R.string.error_generic),
+                    )
+                }
+                _state.value = _state.value.copy(busy = false)
+            }
+            return
+        }
+        val peer = _state.value.peer ?: return
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = _state.value.copy(busy = true, error = null)
             runCatching {
@@ -683,6 +1197,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openChat(chat: JSONObject) {
+        if (chat.optBoolean("local") || isLocalProject(_state.value.selectedProject)) {
+            val chatId = chat.optString("id")
+            if (chatId.isBlank()) return
+            viewModelScope.launch(Dispatchers.IO) {
+                _state.value = _state.value.copy(busy = true, error = null)
+                loadLocalChat(chatId, clearEvents = true)
+                _state.value = _state.value.copy(busy = false)
+                observeLocalChat(chatId)
+            }
+            return
+        }
         val chatId = chat.optString("id")
         val cached = cachedData.chatDetails[chatId]
         if (cached != null) {
@@ -705,6 +1230,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openChat(project: JSONObject, chat: JSONObject) {
+        if (isLocalProject(project)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                loadLocalProject(resetSelection = true)
+                loadLocalChat(chat.optString("id"), clearEvents = true)
+                observeLocalChat(chat.optString("id"))
+            }
+            return
+        }
         selectProjectForSession(project)
         openChat(chat)
     }
@@ -718,6 +1251,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val chat = _state.value.selectedChat ?: return
         val chatId = chat.optString("id")
         if (chatId.isBlank()) return
+        if (chat.optBoolean("local") || isLocalProject(_state.value.selectedProject)) {
+            sendLocalMessage(chat, content, attachments)
+            return
+        }
         projectCommand(text(R.string.status_sending_agent)) { peer, projectId ->
             sendMessageCommand(
                 peer = peer,
@@ -777,7 +1314,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadChat(peer, projectId, chat, clearEvents = false)
         if (runId.isNotBlank()) {
             viewModelScope.launch(Dispatchers.IO) {
-                runCatching { pollRun(peer, projectId, runId) }
+                val monitorCompleted = runCatching { pollRun(peer, projectId, runId) }
                     .onFailure { error ->
                         _state.value = _state.value.copy(
                             error = error.message ?: text(R.string.error_run_monitor_interrupted),
@@ -785,9 +1322,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             status = text(R.string.status_run_monitor_interrupted),
                         )
                     }
-                runCatching { loadChat(peer, projectId, chat, clearEvents = false) }
+                // Workbench drops its live runtime only after the saved
+                // transcript becomes authoritative. Do the same here: the
+                // durable assistant reply/activity cards replace reply_done
+                // and live tool events instead of being rendered beside them.
+                runCatching {
+                    loadChat(peer, projectId, chat, clearEvents = monitorCompleted.isSuccess)
                 }
             }
+        }
     }
 
     private suspend fun pollRun(peer: Peer, projectId: String, runId: String) {
@@ -882,27 +1425,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(selectedChat = updated)
     }
 
-    fun guideRun(message: String) = projectCommand(text(R.string.status_guiding)) { peer, projectId ->
-        val chat = requireNotNull(_state.value.selectedChat)
-        client.command(
-            peer, "runs.guide", projectId,
-            JSONObject()
-                .put("chat_id", chat.getString("id"))
-                .put("message", message.trim())
-                .put("request_id", "guide_" + System.currentTimeMillis()),
-        )
+    fun guideRun(message: String) {
+        if (isLocalProject(_state.value.selectedProject)) {
+            _state.value = _state.value.copy(error = text(R.string.local_agent_guidance_unsupported))
+            return
+        }
+        projectCommand(text(R.string.status_guiding)) { peer, projectId ->
+            val chat = requireNotNull(_state.value.selectedChat)
+            client.command(
+                peer, "runs.guide", projectId,
+                JSONObject()
+                    .put("chat_id", chat.getString("id"))
+                    .put("message", message.trim())
+                    .put("request_id", "guide_" + System.currentTimeMillis()),
+            )
+        }
     }
 
-    fun interruptRun() = projectCommand(text(R.string.status_stopping)) { peer, projectId ->
-        val chat = requireNotNull(_state.value.selectedChat)
-        client.command(
-            peer, "runs.interrupt", projectId,
-            JSONObject().put("chat_id", chat.getString("id")),
-        )
-        _state.value = _state.value.copy(
-            activeRunId = null,
-            status = text(R.string.status_stop_requested),
-        )
+    fun interruptRun() {
+        if (isLocalProject(_state.value.selectedProject)) {
+            val runId = _state.value.activeRunId ?: return
+            LocalAgentForegroundService.stopRun(getApplication(), runId)
+            _state.value = _state.value.copy(status = text(R.string.status_stop_requested))
+            return
+        }
+        projectCommand(text(R.string.status_stopping)) { peer, projectId ->
+            val chat = requireNotNull(_state.value.selectedChat)
+            client.command(
+                peer, "runs.interrupt", projectId,
+                JSONObject().put("chat_id", chat.getString("id")),
+            )
+            _state.value = _state.value.copy(
+                activeRunId = null,
+                status = text(R.string.status_stop_requested),
+            )
+        }
     }
 
     fun answerChat(questionId: String, answer: String) =
@@ -1800,29 +2357,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun applyCachedSnapshot(snapshot: DesktopDataSnapshot) {
-        val projects = snapshot.projects
-        if (projects.isEmpty()) return
+        val remoteProjects = snapshot.projects
+        if (remoteProjects.isEmpty()) return
+        val projects = withLocalProject(remoteProjects)
         val currentProjectId = _state.value.selectedProject?.optString("id").orEmpty()
         val selectedProject = projects.firstOrNull {
             it.optString("id") == currentProjectId
-        } ?: projects.first()
+        } ?: remoteProjects.first()
         val projectData = snapshot.projectData[selectedProject.optString("id")]
             ?: CachedProjectData()
+        val localChats = _state.value.projectChats[LOCAL_PROJECT_ID].orEmpty()
         _state.value = _state.value.copy(
             projects = projects,
             selectedProject = selectedProject,
-            projectChats = snapshot.projectData.mapValues { it.value.chats },
-            projectTasks = snapshot.projectData.mapValues { it.value.tasks },
-            chats = projectData.chats,
-            tasks = projectData.tasks,
-            status = text(R.string.status_cached_projects, projects.size),
+            projectChats = snapshot.projectData.mapValues { it.value.chats } +
+                (LOCAL_PROJECT_ID to localChats),
+            projectTasks = snapshot.projectData.mapValues { it.value.tasks } +
+                (LOCAL_PROJECT_ID to emptyList()),
+            chats = if (isLocalProject(selectedProject)) localChats else projectData.chats,
+            tasks = if (isLocalProject(selectedProject)) emptyList() else projectData.tasks,
+            status = text(R.string.status_cached_projects, remoteProjects.size),
         )
     }
 
     private fun startBackgroundSync(peer: Peer) {
         backgroundSyncJob?.cancel()
         backgroundSyncJob = viewModelScope.launch(Dispatchers.IO) {
-            val projects = _state.value.projects
+            val projects = _state.value.projects.filterNot(::isLocalProject)
             if (projects.isEmpty()) {
                 _state.value = _state.value.copy(
                     backgroundSyncing = false,
@@ -2065,6 +2626,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         client.close()
         super.onCleared()
     }
+}
+
+private fun mergeLocalModelSecrets(incoming: JSONObject, previous: JSONObject?): JSONObject {
+    val merged = JSONObject(incoming.toString())
+    fun mergeArray(key: String) {
+        val next = merged.optJSONArray(key) ?: return
+        val old = previous?.optJSONArray(key)
+        for (index in 0 until next.length()) {
+            val candidate = next.optJSONObject(index) ?: continue
+            if (candidate.optString("api_key").isNotBlank()) continue
+            val id = candidate.optString("id")
+            val model = candidate.optString("model")
+            val prior = (0 until (old?.length() ?: 0)).mapNotNull { old?.optJSONObject(it) }
+                .firstOrNull {
+                    (id.isNotBlank() && it.optString("id") == id) ||
+                        (model.isNotBlank() && it.optString("model") == model)
+                }
+            prior?.optString("api_key")?.takeIf(String::isNotBlank)?.let {
+                candidate.put("api_key", it)
+            }
+            candidate.remove("api_key_configured")
+        }
+    }
+    mergeArray("custom_models")
+    mergeArray("vision_models")
+    val secondary = merged.optJSONObject("secondary_model")
+    if (secondary != null && secondary.optString("api_key").isBlank()) {
+        previous?.optJSONObject("secondary_model")?.optString("api_key")
+            ?.takeIf(String::isNotBlank)?.let { secondary.put("api_key", it) }
+        secondary.remove("api_key_configured")
+    }
+    return merged
 }
 
 private fun JSONArray?.objects(): List<JSONObject> =

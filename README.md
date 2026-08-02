@@ -1,12 +1,14 @@
 # Cyrene Mobile
 
-Cyrene 桌面端的 Android 安全控制器。App 负责安全配对、对话、任务、桌面
-Agent 设置与项目内远程终端；模型、Agent、工具、文件与命令执行始终发生在
-桌面 Cyrene。
+Cyrene 的 Android 工作台。App 支持与桌面端安全配对、远程对话、任务、设置和
+项目终端，也可在手机本地保存会话、直接调用模型，并通过独立 Runtime APK 在
+QEMU + Alpine Linux 中执行文件与命令工具。
 
-## 0.1.1 功能
+## 0.2.0 功能
 
 - 与桌面端一致的对话信息层级、Markdown、工具调用、附件和图片查看体验。
+- “本地”项目可在桌面离线时运行 Agent；会话数据保存在手机，模型配置由
+  Android Keystore 加密，文件与 Bash 工具在独立 Linux Runtime 中执行。
 - 无阴影悬浮输入框，可切换自动/默认/Plan 权限模式、处理桌面端提权确认、
   上传多个附件并停止正在运行的回复；首次安装默认启用自动模式。
 - 左侧菜单统一显示设备、对话、任务、终端与所有会话；全部授权项目的任务和对话
@@ -16,7 +18,9 @@ Agent 设置与项目内远程终端；模型、Agent、工具、文件与命令
   变更、查看器、地图、计划、产物和分支页签。
 - 任务详情复用对话输入框，支持附件派发、暂停、恢复、取消和产物下载。
 - 支持多台桌面设备、安全切换、浅色/深色/跟随系统主题和中英文界面。
-- 设置页可从 GitHub Release 检查、下载并安装后续 APK 更新。
+- 移动终端支持项目切换、实时白色输入、长命令换行和键盘上沿快捷控制栏。
+- 设置页可从 GitHub Release 检查、以 Markdown 展示说明，并一次下载 Runtime 与
+  主 App 两个 APK，依次进入各自的系统安装界面。
 
 ## 构建
 
@@ -26,9 +30,14 @@ Agent 设置与项目内远程终端；模型、Agent、工具、文件与命令
 ./gradlew test lint assembleDebug
 ```
 
-调试 APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
+调试 APK 输出到：
 
-正式发布使用 `v0.1.1` 标签，APK 及完整更新说明见仓库的 GitHub Releases。
+- 主 App：`app/build/outputs/apk/debug/app-debug.apk`
+- Linux Runtime：`runtime-app/build/outputs/apk/debug/runtime-app-debug.apk`
+
+正式发布使用 `v0.2.0` 标签。首次手动安装时先装 Runtime APK，再装主 App APK；
+App 内更新会自动下载两个包并按此顺序打开安装界面，但 Android 仍要求用户分别确认。
+只使用远程功能时可仅安装主 App。完整说明见仓库的 GitHub Releases。
 
 ## 使用
 
@@ -40,8 +49,8 @@ Agent 设置与项目内远程终端；模型、Agent、工具、文件与命令
 客户端通过配对后的加密连接调用桌面 RemoteGateway。App 退出不会停止桌面端
 Run；重新进入终端时会在当前授权项目内建立新的交互式 Shell 会话。
 
-> 完整使用 0.1.1 的移动端权限确认和 OpenAI OAuth 管理，需要同步更新支持对应
-> 远程命令的 Cyrene Desktop。
+> 完整使用 0.2.0 的移动端权限确认、模型配置复制和 OpenAI OAuth 管理，需要同步
+> 更新支持对应远程命令的 Cyrene Desktop。模型配置复制完成后，本地会话可离线使用。
 
 ## 安全边界
 

@@ -35,4 +35,29 @@ class RecentSessionsTest {
             it.project.getString("name")
         })
     }
+
+    @Test
+    fun mixesLocalChatsWithRemoteSessionsByTheSameTimestampRule() {
+        val local = JSONObject().put("id", LOCAL_PROJECT_ID).put("name", "Local")
+        val remote = JSONObject().put("id", "project_remote").put("name", "Remote")
+        val localChat = JSONObject()
+            .put("id", "ls_1")
+            .put("local", true)
+            .put("updatedAt", "2026-08-01T11:00:00Z")
+        val remoteChat = JSONObject()
+            .put("id", "chat_1")
+            .put("updated_at", "2026-08-01T10:00:00Z")
+
+        val sessions = recentSessionsForProjects(
+            projects = listOf(local, remote),
+            projectChats = mapOf(
+                LOCAL_PROJECT_ID to listOf(localChat),
+                "project_remote" to listOf(remoteChat),
+            ),
+            projectTasks = emptyMap(),
+        )
+
+        assertEquals(listOf("ls_1", "chat_1"), sessions.map { it.data.getString("id") })
+        assertEquals(listOf("Local", "Remote"), sessions.map { it.project.getString("name") })
+    }
 }

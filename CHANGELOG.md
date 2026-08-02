@@ -2,6 +2,65 @@
 
 本文记录 Cyrene Mobile 的重要变更。
 
+## 0.2.0 — 2026-08-02
+
+### 本地 Agent 与 Linux Runtime
+
+- 新增完全由 Android 管理的“本地”项目：会话、消息、Run、工具调用、计划、
+  审批、产物与执行轨迹保存在手机 SQLite 中，可在没有桌面连接时继续使用。
+- 手机可通过配对后的端到端加密通道复制桌面模型配置，并以 Android Keystore
+  加密 API Key；模型请求和 Agent 循环直接在手机执行，Codex OAuth Token 不会复制。
+- 新增独立的 Cyrene Linux Runtime APK，以签名权限 Binder 连接主 App，在真实
+  QEMU TCG + Alpine Linux 3.24 环境中提供 Read、Write、Edit、Glob、Grep 和 Bash。
+- 所有本地会话共享持久化 `/workspace` 与 Alpine 根文件系统；文件和通过 `apk add`
+  安装的软件在会话切换、Runtime 进程重启后仍然保留。
+- Runtime 镜像使用 RSA 签名 manifest 和逐项 SHA-256 校验，固定 QEMU、Alpine、
+  内核与固件来源；拒绝绝对路径、`..` 越界、超时命令和超限输入输出。
+
+### 会话与执行过程
+
+- 重构实时会话时间线，把模型思考、工具调用、工具结果和最终回复按真实顺序组合，
+  消除轮询期间的重复卡片，并保留本地 Run 恢复后的执行状态。
+- 执行卡片支持折叠较早步骤，补充 Bash、文件工具、浏览器、子 Agent 等中文与英文
+  工具名称，让长任务的过程更易阅读。
+- 本地与远程会话共用会话列表、聊天详情和输入框；本地会话支持创建、恢复、重命名、
+  删除、停止运行和持久化历史。
+- 优化桌面离线状态：仍可进入本地会话，并明确区分在线项目、缓存项目和连接失败。
+
+### 移动终端
+
+- 将提示符与实时输入移入终端内容区，统一使用白色文本；长命令到达屏幕边缘后自动
+  换行，不再出现占位文字竖排或独立底部输入栏。
+- 快捷控制栏在软键盘弹出时保持贴在键盘上沿，并继续支持 Ctrl-C、Ctrl-L、Tab、
+  历史命令、粘贴与 Ctrl-D。
+- 终端顶部仅显示当前项目名，可直接切换授权项目并为目标项目重新建立 Shell 会话。
+
+### 设置、更新与连接
+
+- 更新页的 GitHub Release 说明改用与聊天一致的 Markwon 渲染，正确显示标题、
+  列表、强调、链接、代码块和表格。
+- 当同一 Release 同时包含主 App 与 Runtime APK 时，应用内更新器会明确选择
+  `Cyrene-Mobile` 主 APK，避免误下载 Runtime companion。
+- 应用内更新现在会一次下载主 App 与 Runtime 两个 APK，先打开 Runtime 的系统
+  安装界面，安装完成返回后再打开主 App 安装界面；取消 Runtime 安装时会停止流程。
+- 设置页重新区分本地设置、模型设置和桌面端设置；本地模型配置保存后可同步回桌面。
+- 增强配对与连接错误说明，区分无网络路由、超时、拒绝连接、无效/过期配对密钥、
+  无法解析地址及桌面端网关不可用。
+
+### 安装与兼容性
+
+- 主 App 版本为 `0.2.0`（versionCode 3），支持 Android 9（API 28）或更新版本。
+- 远程控制功能只需安装 `Cyrene-Mobile-0.2.0.apk`；使用本地 Linux 工具时还需安装
+  同一 Release 中的 `Cyrene-Mobile-Runtime-0.2.0.apk`，两者必须使用相同签名。
+- 本地 Agent 的模型配置复制仍需要兼容 `settings.models.copy` 的 Cyrene Desktop；
+  配置已安全保存到手机后，桌面离线不影响本地会话。
+
+### 验证
+
+- 通过主 App 与 Runtime 的 Debug 编译、单元测试和 Android Lint。
+- 在 Android API 35 ARM64 模拟器验证项目切换、终端长命令换行、键盘避让、
+  本地会话入口、Binder Runtime、QEMU 启动、Linux 网络、软件安装和跨会话持久化。
+
 ## 0.1.1 — 2026-08-01
 
 ### 权限与运行

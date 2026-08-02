@@ -10,10 +10,18 @@ import java.net.URL
 data class GithubRelease(
     val version: String,
     val releaseUrl: String,
-    val apkUrl: String?,
-    val apkName: String?,
+    val mainApk: GithubApkAsset?,
+    val runtimeApk: GithubApkAsset?,
     val notes: String,
     val publishedAt: String,
+) {
+    val apkUrl: String? get() = mainApk?.url
+    val apkName: String? get() = mainApk?.name
+}
+
+data class GithubApkAsset(
+    val name: String,
+    val url: String,
 )
 
 sealed interface UpdateCheckResult {
@@ -59,25 +67,32 @@ object GithubUpdateService {
         val version = root.getString("tag_name")
         val releaseUrl = root.getString("html_url")
         val assets = root.optJSONArray("assets")
-        var apkUrl: String? = null
-        var apkName: String? = null
-        if (assets != null) {
-            for (index in 0 until assets.length()) {
-                val asset = assets.optJSONObject(index) ?: continue
-                if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
-                    apkUrl = asset.optString("browser_download_url").takeIf(String::isNotBlank)
-                    if (apkUrl != null) {
-                        apkName = asset.optString("name").takeIf(String::isNotBlank)
-                        break
-                    }
-                }
+        val apkAssets = if (assets != null) {
+            val apkAssets = (0 until assets.length())
+                .mapNotNull(assets::optJSONObject)
+                .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
+            apkAssets.mapNotNull { asset ->
+                val name = asset.optString("name").takeIf(String::isNotBlank)
+                val url = asset.optString("browser_download_url").takeIf(String::isNotBlank)
+                if (name != null && url != null) GithubApkAsset(name, url) else null
             }
+        } else {
+            emptyList()
+        }
+        val runtimeApk = apkAssets.firstOrNull {
+            it.name.contains("runtime", ignoreCase = true)
+        }
+        val mainApk = apkAssets.firstOrNull {
+            it.name.contains("cyrene-mobile", ignoreCase = true) &&
+                !it.name.contains("runtime", ignoreCase = true)
+        } ?: apkAssets.firstOrNull {
+            !it.name.contains("runtime", ignoreCase = true)
         }
         return GithubRelease(
             version = version,
             releaseUrl = releaseUrl,
-            apkUrl = apkUrl,
-            apkName = apkName,
+            mainApk = mainApk,
+            runtimeApk = runtimeApk,
             notes = root.optString("body"),
             publishedAt = root.optString("published_at"),
         )

@@ -56,4 +56,52 @@ class GithubUpdateServiceTest {
         assertEquals(null, release.apkUrl)
         assertEquals("https://github.com/example/releases/v0.2.0", release.releaseUrl)
     }
+
+    @Test
+    fun prefersMainAppWhenReleaseAlsoContainsRuntimeApk() {
+        val release = GithubUpdateService.parseRelease(
+            """
+            {
+              "tag_name": "v0.2.0",
+              "html_url": "https://github.com/example/releases/v0.2.0",
+              "assets": [
+                {
+                  "name": "Cyrene-Mobile-Runtime-0.2.0.apk",
+                  "browser_download_url": "https://github.com/example/runtime.apk"
+                },
+                {
+                  "name": "Cyrene-Mobile-0.2.0.apk",
+                  "browser_download_url": "https://github.com/example/mobile.apk"
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals("Cyrene-Mobile-0.2.0.apk", release.apkName)
+        assertEquals("https://github.com/example/mobile.apk", release.apkUrl)
+        assertEquals("Cyrene-Mobile-Runtime-0.2.0.apk", release.runtimeApk?.name)
+        assertEquals("https://github.com/example/runtime.apk", release.runtimeApk?.url)
+    }
+
+    @Test
+    fun doesNotTreatRuntimeOnlyAssetAsMainApp() {
+        val release = GithubUpdateService.parseRelease(
+            """
+            {
+              "tag_name": "v0.2.0",
+              "html_url": "https://github.com/example/releases/v0.2.0",
+              "assets": [
+                {
+                  "name": "Cyrene-Mobile-Runtime-0.2.0.apk",
+                  "browser_download_url": "https://github.com/example/runtime.apk"
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(null, release.mainApk)
+        assertEquals("Cyrene-Mobile-Runtime-0.2.0.apk", release.runtimeApk?.name)
+    }
 }

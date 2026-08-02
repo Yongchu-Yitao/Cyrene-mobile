@@ -17,6 +17,35 @@ data class ApprovalQuestion(
     val allowCustom: Boolean,
 )
 
+private fun permissionKind(value: JSONObject): String = value.optString("kind").ifBlank {
+    value.optString("questionKind").ifBlank {
+        value.optJSONObject("meta")?.optString("kind").orEmpty()
+    }
+}
+
+fun isPermissionQuestion(kind: String): Boolean =
+    kind.contains("permission", ignoreCase = true) || kind in setOf(
+        "scope_elevation",
+        "read_elevation",
+        "destructive_confirmation",
+        "external_delivery_request",
+        "process_execution",
+        "external_tool_execution",
+        "task_permission_request",
+        "remote_harness_invoke",
+    )
+
+private fun normalizedOptions(value: JSONObject, kind: String): List<ApprovalOption> =
+    if (isPermissionQuestion(kind)) {
+        listOf(
+            ApprovalOption(id = "approve_session", label = "在本次会话同意"),
+            ApprovalOption(id = "approve_once", label = "同意一次"),
+            ApprovalOption(id = "deny", label = "拒绝"),
+        )
+    } else {
+        parseApprovalOptions(value.optJSONArray("options") ?: value.optJSONArray("choices"))
+    }
+
 fun pendingApprovalQuestion(
     chat: JSONObject?,
     runEvents: List<JSONObject> = emptyList(),
@@ -41,17 +70,16 @@ fun pendingApprovalQuestion(
             message.optString("questionId")
         }
         if (questionId.isBlank()) continue
+        val kind = message.optString("question_kind").ifBlank {
+            message.optString("questionKind")
+        }
         return ApprovalQuestion(
             id = questionId,
             title = "",
             prompt = message.optString("content").ifBlank { message.optString("text") },
-            kind = message.optString("question_kind").ifBlank {
-                message.optString("questionKind")
-            },
-            options = parseApprovalOptions(
-                message.optJSONArray("options") ?: message.optJSONArray("choices")
-            ),
-            allowCustom = true,
+            kind = kind,
+            options = normalizedOptions(message, kind),
+            allowCustom = !isPermissionQuestion(kind),
         )
     }
     return null
@@ -61,17 +89,16 @@ fun parseApprovalQuestion(value: JSONObject?): ApprovalQuestion? {
     value ?: return null
     val id = value.optString("id").ifBlank { value.optString("questionId") }
     if (id.isBlank()) return null
+    val kind = permissionKind(value)
     return ApprovalQuestion(
         id = id,
         title = value.optString("title"),
         prompt = value.optString("text").ifBlank {
             value.optString("prompt").ifBlank { value.optString("question") }
         },
-        kind = value.optString("kind").ifBlank { value.optString("questionKind") },
-        options = parseApprovalOptions(
-            value.optJSONArray("options") ?: value.optJSONArray("choices")
-        ),
-        allowCustom = when {
+        kind = kind,
+        options = normalizedOptions(value, kind),
+        allowCustom = if (isPermissionQuestion(kind)) false else when {
             value.has("allowCustom") -> value.optBoolean("allowCustom")
             value.has("allow_custom") -> value.optBoolean("allow_custom")
             else -> true

@@ -43,8 +43,43 @@ class PermissionModeTest {
         val question = requireNotNull(pendingApprovalQuestion(chat))
         assertEquals("question_1", question.id)
         assertEquals("Allow access outside the workspace?", question.prompt)
-        assertEquals(listOf("Allow once", "Deny"), question.options.map { it.label })
+        assertEquals(listOf("在本次会话同意", "同意一次", "拒绝"), question.options.map { it.label })
         assertFalse(question.allowCustom)
+    }
+
+    @Test
+    fun normalizesLegacyPermissionQuestionToScopedSelector() {
+        val question = requireNotNull(
+            parseApprovalQuestion(
+                JSONObject()
+                    .put("id", "question_legacy")
+                    .put("allow_custom", true)
+                    .put(
+                        "options",
+                        JSONArray().put("Allow once").put("Always allow").put("Deny"),
+                    )
+                    .put("meta", JSONObject().put("kind", "read_elevation")),
+            ),
+        )
+
+        assertEquals("read_elevation", question.kind)
+        assertEquals(listOf("在本次会话同意", "同意一次", "拒绝"), question.options.map { it.label })
+        assertFalse(question.allowCustom)
+    }
+
+    @Test
+    fun keepsClarificationChoicesAndCustomAnswer() {
+        val question = requireNotNull(
+            parseApprovalQuestion(
+                JSONObject()
+                    .put("id", "question_clarification")
+                    .put("kind", "clarification")
+                    .put("options", JSONArray().put("北京").put("上海")),
+            ),
+        )
+
+        assertEquals(listOf("北京", "上海"), question.options.map { it.label })
+        assertTrue(question.allowCustom)
     }
 
     @Test

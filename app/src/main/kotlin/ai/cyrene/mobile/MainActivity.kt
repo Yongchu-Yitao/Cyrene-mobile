@@ -14,7 +14,6 @@ import android.os.ParcelFileDescriptor
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.text.method.LinkMovementMethod
 import android.view.KeyEvent as AndroidKeyEvent
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -25,6 +24,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -47,11 +47,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -140,7 +142,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -156,7 +161,6 @@ import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.History
-import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Check
@@ -181,6 +185,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TableAwareMovementMethod
+import io.noties.markwon.ext.tables.TablePlugin
+import io.noties.markwon.ext.tables.TableTheme
+import io.noties.markwon.movement.MovementMethodPlugin
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -207,7 +215,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+        )
         setContent {
             val model: MainViewModel = viewModel()
             val state by model.state.collectAsStateWithLifecycle()
@@ -287,6 +304,7 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
                 primary = Color(0xFFB8C4FF),
                 onPrimary = Color(0xFF10225D),
                 primaryContainer = Color(0xFF293E7A),
+                onPrimaryContainer = Color(0xFFDDE2FF),
                 secondary = Color(0xFFCEBDFA),
                 onSecondary = Color(0xFF35275A),
                 secondaryContainer = Color(0xFF4C3E72),
@@ -296,13 +314,24 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
                 tertiaryContainer = Color(0xFF15512F),
                 onTertiaryContainer = Color(0xFFA7F2C3),
                 background = Color(0xFF111318),
+                onBackground = Color(0xFFE3E2E9),
                 surface = Color(0xFF191B20),
+                onSurface = Color(0xFFE3E2E9),
+                surfaceVariant = Color(0xFF44464F),
+                onSurfaceVariant = Color(0xFFC5C6D0),
+                outline = Color(0xFF8F909A),
+                outlineVariant = Color(0xFF44464F),
+                error = Color(0xFFFFB4AB),
+                onError = Color(0xFF690005),
+                errorContainer = Color(0xFF93000A),
+                onErrorContainer = Color(0xFFFFDAD6),
             )
         } else {
             androidx.compose.material3.lightColorScheme(
                 primary = Color(0xFF4059AD),
                 onPrimary = Color.White,
                 primaryContainer = Color(0xFFDDE2FF),
+                onPrimaryContainer = Color(0xFF00174B),
                 secondary = Color(0xFF67548B),
                 onSecondary = Color.White,
                 secondaryContainer = Color(0xFFF2ECFF),
@@ -312,7 +341,17 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
                 tertiaryContainer = Color(0xFFD7F4E1),
                 onTertiaryContainer = Color(0xFF103821),
                 background = Color(0xFFF8F8FC),
+                onBackground = Color(0xFF1B1B20),
                 surface = Color(0xFFFFFFFF),
+                onSurface = Color(0xFF1B1B20),
+                surfaceVariant = Color(0xFFE3E2EC),
+                onSurfaceVariant = Color(0xFF46464F),
+                outline = Color(0xFF777780),
+                outlineVariant = Color(0xFFC7C6D0),
+                error = Color(0xFFBA1A1A),
+                onError = Color.White,
+                errorContainer = Color(0xFFFFDAD6),
+                onErrorContainer = Color(0xFF410002),
             )
         },
         content = content,
@@ -322,14 +361,10 @@ private fun CyreneTheme(theme: String, content: @Composable () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
-    if (state.peer == null) {
-        PairingScreen(state, model)
-        return
-    }
     var tab by remember { mutableIntStateOf(2) }
     var settingsPageId by remember { mutableStateOf<String?>(null) }
     var showAddDevice by remember { mutableStateOf(false) }
-    LaunchedEffect(state.peer.deviceId) {
+    LaunchedEffect(state.peer?.deviceId) {
         showAddDevice = false
     }
     if (showAddDevice) {
@@ -364,7 +399,8 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val rightPanelAvailable =
-        (tab == 2 && state.selectedChat != null) ||
+        (tab == 2 && state.selectedChat != null &&
+            state.selectedProject?.optString("id") != LOCAL_PROJECT_ID) ||
             (tab == 3 && state.selectedTask != null)
     var rightPanelOpen by remember { mutableStateOf(false) }
     var rightPanelDragging by remember { mutableStateOf(false) }
@@ -752,8 +788,9 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                 ),
         ) {
             Scaffold(
-            topBar = {
-                TopAppBar(
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                topBar = {
+                    TopAppBar(
                     navigationIcon = {
                         if (tab == 5 && settingsPageId != null) {
                             IconButton(onClick = { settingsPageId = null }) {
@@ -802,8 +839,8 @@ private fun CyreneMobile(state: MobileUiState, model: MainViewModel) {
                             CircularProgressIndicator(Modifier.padding(16.dp).width(22.dp))
                         }
                     },
-                )
-            },
+                    )
+                },
             ) { padding ->
                 Box(Modifier.padding(padding).fillMaxSize()) {
                     when (tab) {
@@ -2774,9 +2811,9 @@ private fun DeviceScreen(
     model: MainViewModel,
     onAddDevice: () -> Unit,
 ) {
-    val activePeer = state.peer ?: return
+    val activePeer = state.peer
     var detailDeviceId by remember { mutableStateOf<String?>(null) }
-    if (detailDeviceId == activePeer.deviceId) {
+    if (activePeer != null && detailDeviceId == activePeer.deviceId) {
         BackHandler { detailDeviceId = null }
         DeviceDetailScreen(state, model)
         return
@@ -2797,8 +2834,11 @@ private fun DeviceScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (state.peers.isEmpty()) {
+                item { EmptyCard(stringResource(R.string.devices_empty)) }
+            }
             items(state.peers, key = { it.deviceId }) { peer ->
-                val isActive = peer.deviceId == activePeer.deviceId
+                val isActive = peer.deviceId == activePeer?.deviceId
                 DataCard(
                     title = peer.name,
                     subtitle = if (!isActive) {
@@ -2810,8 +2850,16 @@ private fun DeviceScreen(
                         )
                     } else if (state.busy) {
                         stringResource(R.string.device_syncing)
+                    } else if (!state.desktopConnected) {
+                        stringResource(
+                            R.string.device_unavailable_projects,
+                            state.projects.count { it.optString("id") != LOCAL_PROJECT_ID },
+                        )
                     } else {
-                        stringResource(R.string.device_online_projects, state.projects.size)
+                        stringResource(
+                            R.string.device_online_projects,
+                            state.projects.count { it.optString("id") != LOCAL_PROJECT_ID },
+                        )
                     },
                     trailing = stringResource(R.string.action_details),
                     progress = state.backgroundSyncProgress.takeIf {
@@ -2897,9 +2945,19 @@ private fun DeviceDetailScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        stringResource(R.string.device_connected),
+                        stringResource(
+                            if (state.desktopConnected) {
+                                R.string.device_connected
+                            } else {
+                                R.string.device_unavailable
+                            },
+                        ),
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = if (state.desktopConnected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
@@ -3246,7 +3304,9 @@ private fun ChatScreen(state: MobileUiState, model: MainViewModel) {
             onPermissionModeChange = model::setPermissionMode,
             busy = state.creatingChat,
             onSend = {
-                model.sendNewChatMessage(message, state.permissionMode)
+                if (model.sendNewChatMessage(message, state.permissionMode)) {
+                    message = ""
+                }
             },
         )
     } else {
@@ -3273,6 +3333,7 @@ private fun PendingChatDetail(
     busy: Boolean,
     onSend: () -> Unit,
 ) {
+    val isLocal = selectedProject.optString("id") == LOCAL_PROJECT_ID
     Box(Modifier.fillMaxSize()) {
         NewChatWelcome(
             projects = projects,
@@ -3295,6 +3356,13 @@ private fun PendingChatDetail(
             onRemoveAttachment = {},
             onSend = onSend,
             onInterrupt = {},
+            attachmentsEnabled = !isLocal,
+            modeMenuEnabled = !isLocal,
+            placeholderRes = if (isLocal) {
+                R.string.local_agent_composer
+            } else {
+                R.string.chat_composer_desktop
+            },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -3312,6 +3380,7 @@ private fun ChatDetail(
     onPermissionModeChange: (PermissionMode) -> Unit,
 ) {
     val chat = state.selectedChat ?: return
+    val isLocal = state.selectedProject?.optString("id") == LOCAL_PROJECT_ID
     val context = LocalContext.current
     var pendingAttachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
     val attachmentPicker = rememberLauncherForActivityResult(
@@ -3326,17 +3395,10 @@ private fun ChatDetail(
     val pendingQuestion = pendingApprovalQuestion(chat, state.runEvents)
     Column(Modifier.fillMaxSize()) {
         val listState = rememberLazyListState()
-        val eventReply = state.runEvents
-            .filter { it.optString("type") == "reply_delta" }
-            .joinToString("") { it.optString("delta") }
-            .ifBlank {
-                state.runEvents.lastOrNull { it.optString("type") == "reply_done" }
-                    ?.optString("response").orEmpty()
-            }
-        val liveTrace = state.runEvents.filter {
-            val type = it.optString("type")
-            type.startsWith("tool_call") || type == "tool_progress"
-        }
+        val liveTimeline = withoutDurableDuplicates(
+            liveConversationTimeline(state.runEvents, state.activeRunId != null),
+            messages,
+        )
         val runError = state.runEvents.lastOrNull { it.optString("type") == "error" }
         val retryContent = if (messages == null) "" else
             (messages.length() - 1 downTo 0).firstNotNullOfOrNull { index ->
@@ -3346,11 +3408,11 @@ private fun ChatDetail(
                     ?.let(::displayMessageContent)
                     ?.takeIf(String::isNotBlank)
             }.orEmpty()
-        val transcriptCount = (messages?.length() ?: 0) +
-            (if (liveTrace.isNotEmpty() || state.activeRunId != null) 1 else 0) +
-            (if (eventReply.isNotBlank()) 1 else 0) +
+        val transcriptCount = (messages?.length() ?: 0) + liveTimeline.size +
             (if (runError != null) 1 else 0)
-        LaunchedEffect(transcriptCount, eventReply.length) {
+        val liveReplyLength = liveTimeline.lastOrNull { it.optBoolean("liveReply") }
+            ?.optString("content")?.length ?: 0
+        LaunchedEffect(transcriptCount, liveReplyLength) {
             if (transcriptCount > 0) listState.animateScrollToItem(transcriptCount - 1)
         }
         Box(Modifier.weight(1f)) {
@@ -3384,22 +3446,15 @@ private fun ChatDetail(
                         )
                     }
                 }
-                if (liveTrace.isNotEmpty() || state.activeRunId != null) {
-                    item {
-                        ExecutionCard(
-                            entries = liveTrace,
-                            running = state.activeRunId != null,
-                        )
-                    }
-                }
-                if (eventReply.isNotBlank()) {
-                    item {
-                        AssistantMessage(
-                            content = eventReply,
-                            timestamp = "",
-                            running = state.activeRunId != null,
-                        )
-                    }
+                items(liveTimeline.size, key = { liveTimeline[it].optString("id", "live-$it") }) { index ->
+                    val item = liveTimeline[index]
+                    ConversationMessage(
+                        message = item,
+                        state = state,
+                        model = model,
+                        onEdit = {},
+                        onRetry = {},
+                    )
                 }
                 if (runError != null) {
                     item {
@@ -3453,12 +3508,24 @@ private fun ChatDetail(
                     onSend = {
                         if (state.activeRunId == null) {
                             model.sendMessage(message, permissionMode, pendingAttachments)
+                            onMessageChange("")
+                            pendingAttachments = emptyList()
                         }
-                        else model.guideRun(message)
-                        onMessageChange("")
-                        pendingAttachments = emptyList()
+                        else if (!isLocal) {
+                            model.guideRun(message)
+                            onMessageChange("")
+                        }
                     },
                     onInterrupt = model::interruptRun,
+                    attachmentsEnabled = !isLocal,
+                    modeMenuEnabled = !isLocal,
+                    inputEnabled = !(isLocal && state.activeRunId != null),
+                    interruptWhileRunning = isLocal,
+                    placeholderRes = if (isLocal) {
+                        R.string.local_agent_composer
+                    } else {
+                        R.string.chat_composer_desktop
+                    },
                 )
             }
         }
@@ -3473,8 +3540,7 @@ private fun ApprovalQuestionCard(
     modifier: Modifier = Modifier,
 ) {
     var customAnswer by remember(question.id) { mutableStateOf("") }
-    val isPermission = question.kind.contains("permission", ignoreCase = true) ||
-        question.kind in setOf("destructive_confirmation", "external_upload_confirmation")
+    val isPermission = isPermissionQuestion(question.kind)
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
@@ -3719,6 +3785,8 @@ private fun ChatComposer(
     modeMenuEnabled: Boolean = true,
     planModeEnabled: Boolean = true,
     interruptWhileRunning: Boolean = false,
+    attachmentsEnabled: Boolean = true,
+    inputEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     var modeMenuOpen by remember { mutableStateOf(false) }
@@ -3783,7 +3851,7 @@ private fun ChatComposer(
                     .fillMaxWidth()
                     .heightIn(min = 60.dp, max = 160.dp)
                     .padding(horizontal = 2.dp, vertical = 3.dp),
-                enabled = !busy,
+                enabled = !busy && inputEnabled,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = MaterialTheme.colorScheme.onSurface,
                     lineHeight = 24.sp,
@@ -3815,7 +3883,7 @@ private fun ChatComposer(
             ) {
                 IconButton(
                     onClick = onAddAttachment,
-                    enabled = !running && !busy,
+                    enabled = attachmentsEnabled && !running && !busy,
                     modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
@@ -4183,6 +4251,7 @@ private fun TaskScreen(state: MobileUiState, model: MainViewModel) {
 @Composable
 private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
     var input by remember { mutableStateOf("") }
+    var projectMenuExpanded by remember { mutableStateOf(false) }
     var history by remember(state.selectedProject?.optString("id")) {
         mutableStateOf<List<String>>(emptyList())
     }
@@ -4207,6 +4276,12 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
     val terminalDanger = Color(0xFFFF8A80)
     val terminalReady = state.terminalSessionStatus == "running"
     val projectName = state.selectedProject?.optString("name").orEmpty()
+    val terminalProjects = state.projects.filterNot {
+        it.optString("id") == LOCAL_PROJECT_ID
+    }
+    val promptTransformation = remember(state.terminalPrompt) {
+        TerminalPromptVisualTransformation("${state.terminalPrompt} ")
+    }
     fun focusTerminalInput() {
         if (!terminalReady) return
         focusRequester.requestFocus()
@@ -4221,9 +4296,9 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
     ) {
         model.ensureTerminalShell()
     }
-    LaunchedEffect(state.terminalLines.size) {
-        if (state.terminalLines.isNotEmpty()) {
-            listState.scrollToItem(state.terminalLines.lastIndex)
+    LaunchedEffect(state.terminalLines.size, input, terminalReady) {
+        if (terminalReady) {
+            listState.scrollToItem(state.terminalLines.size)
         }
     }
     LaunchedEffect(state.terminalSessionStatus) {
@@ -4271,6 +4346,7 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .background(terminalBackground)
+            .imePadding()
             .clickable(
                 enabled = terminalReady,
                 onClick = ::focusTerminalInput,
@@ -4296,30 +4372,61 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
                     )
             )
             Spacer(Modifier.width(9.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    projectName.ifBlank { stringResource(R.string.terminal_title) },
-                    color = terminalText,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    when (state.terminalSessionStatus) {
-                        "running" -> stringResource(
-                            R.string.terminal_session_path,
-                            state.terminalCwd,
+            Box(Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier
+                        .clickable(
+                            enabled = terminalProjects.isNotEmpty() && !state.terminalBusy,
+                            onClick = { projectMenuExpanded = true },
                         )
-                        "connecting" -> stringResource(R.string.terminal_connecting)
-                        else -> stringResource(R.string.terminal_disconnected)
-                    },
-                    color = terminalMuted,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        projectName.ifBlank { stringResource(R.string.terminal_title) },
+                        color = terminalText,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Icon(
+                        Icons.Outlined.KeyboardArrowDown,
+                        contentDescription = stringResource(R.string.project_choose),
+                        tint = terminalMuted,
+                        modifier = Modifier.size(17.dp),
+                    )
+                }
+                DropdownMenu(
+                    expanded = projectMenuExpanded,
+                    onDismissRequest = { projectMenuExpanded = false },
+                ) {
+                    terminalProjects.forEach { project ->
+                        val projectId = project.optString("id")
+                        val selected = projectId == state.selectedProject?.optString("id")
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    project.optString("name").ifBlank {
+                                        stringResource(R.string.project_unnamed)
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            trailingIcon = if (selected) {
+                                { Icon(Icons.Outlined.Check, contentDescription = null) }
+                            } else {
+                                null
+                            },
+                            onClick = {
+                                projectMenuExpanded = false
+                                if (!selected) model.selectProject(project)
+                            },
+                        )
+                    }
+                }
             }
             if (state.terminalBusy) {
                 CircularProgressIndicator(
@@ -4377,16 +4484,6 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            if (state.terminalLines.isEmpty() && terminalReady) {
-                item {
-                    Text(
-                        stringResource(R.string.terminal_ready_hint),
-                        color = terminalMuted.copy(alpha = .7f),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
             if (state.terminalSessionStatus == "connecting") {
                 item {
                     Text(
@@ -4443,6 +4540,76 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
                     }
                 }
             }
+            if (terminalReady) {
+                item(key = "terminal-input") {
+                    BasicTextField(
+                        value = input,
+                        onValueChange = {
+                            input = it.replace("\n", "")
+                            if (historyIndex != history.size) {
+                                historyIndex = history.size
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester)
+                            .onPreviewKeyEvent { event ->
+                                val keyEvent = event.nativeKeyEvent
+                                if (keyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
+                                    false
+                                } else {
+                                    when {
+                                        keyEvent.isCtrlPressed &&
+                                            keyEvent.keyCode == AndroidKeyEvent.KEYCODE_C -> {
+                                            model.interruptTerminal()
+                                            true
+                                        }
+                                        keyEvent.isCtrlPressed &&
+                                            keyEvent.keyCode == AndroidKeyEvent.KEYCODE_L -> {
+                                            model.clearTerminalOutput()
+                                            true
+                                        }
+                                        keyEvent.isCtrlPressed &&
+                                            keyEvent.keyCode == AndroidKeyEvent.KEYCODE_D -> {
+                                            if (!state.terminalBusy) {
+                                                model.sendTerminalCommand("exit")
+                                            }
+                                            true
+                                        }
+                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_UP -> {
+                                            previousCommand()
+                                            true
+                                        }
+                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
+                                            nextCommand()
+                                            true
+                                        }
+                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_TAB -> {
+                                            input += "\t"
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
+                            },
+                        singleLine = false,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = terminalText,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp,
+                        ),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Ascii,
+                            imeAction = ImeAction.Send,
+                            autoCorrectEnabled = false,
+                        ),
+                        keyboardActions = KeyboardActions(onSend = { submit() }),
+                        cursorBrush = SolidColor(terminalText),
+                        visualTransformation = promptTransformation,
+                    )
+                }
+            }
         }
         if (terminalReady) {
             HorizontalDivider(color = terminalDivider)
@@ -4491,122 +4658,26 @@ private fun TerminalScreen(state: MobileUiState, model: MainViewModel) {
                     }
                 }
             }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(terminalBackground)
-                    .padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "${state.terminalPrompt} ",
-                    color = terminalAccent,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 14.sp,
-                )
-                BasicTextField(
-                    value = input,
-                    onValueChange = {
-                        input = it
-                        if (historyIndex != history.size) historyIndex = history.size
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .focusRequester(focusRequester)
-                        .onPreviewKeyEvent { event ->
-                            val keyEvent = event.nativeKeyEvent
-                            if (keyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
-                                false
-                            } else {
-                                when {
-                                    keyEvent.isCtrlPressed &&
-                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_C -> {
-                                        model.interruptTerminal()
-                                        true
-                                    }
-                                    keyEvent.isCtrlPressed &&
-                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_L -> {
-                                        model.clearTerminalOutput()
-                                        true
-                                    }
-                                    keyEvent.isCtrlPressed &&
-                                        keyEvent.keyCode == AndroidKeyEvent.KEYCODE_D -> {
-                                        if (!state.terminalBusy) {
-                                            model.sendTerminalCommand("exit")
-                                        }
-                                        true
-                                    }
-                                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_UP -> {
-                                        previousCommand()
-                                        true
-                                    }
-                                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
-                                        nextCommand()
-                                        true
-                                    }
-                                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_TAB -> {
-                                        input += "\t"
-                                        true
-                                    }
-                                    else -> false
-                                }
-                            }
-                        },
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(
-                        color = terminalText,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 14.sp,
-                    ),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Ascii,
-                        imeAction = ImeAction.Send,
-                        autoCorrectEnabled = false,
-                    ),
-                    keyboardActions = KeyboardActions(onSend = { submit() }),
-                    cursorBrush = SolidColor(terminalAccent),
-                    decorationBox = { innerTextField ->
-                        Box {
-                            if (input.isEmpty()) {
-                                Text(
-                                    stringResource(R.string.terminal_placeholder),
-                                    color = terminalMuted.copy(alpha = .45f),
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 14.sp,
-                                )
-                            }
-                            innerTextField()
-                        }
-                    },
-                )
-                IconButton(
-                    onClick = ::previousCommand,
-                    enabled = history.isNotEmpty(),
-                    modifier = Modifier.size(34.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.KeyboardArrowUp,
-                        contentDescription = stringResource(R.string.terminal_previous_command),
-                        tint = terminalMuted,
-                    )
-                }
-                IconButton(
-                    onClick = { submit() },
-                    enabled = input.isNotBlank() && !state.terminalBusy,
-                    modifier = Modifier.size(34.dp),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Outlined.Send,
-                        contentDescription = stringResource(R.string.action_send),
-                        tint = if (input.isNotBlank() && !state.terminalBusy) {
-                            terminalAccent
-                        } else {
-                            terminalMuted.copy(alpha = .35f)
-                        },
-                    )
-                }
-            }
         }
+    }
+}
+
+private class TerminalPromptVisualTransformation(
+    private val prompt: String,
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val transformedText = AnnotatedString(prompt + text.text)
+        val promptLength = prompt.length
+        return TransformedText(
+            transformedText,
+            object : OffsetMapping {
+                override fun originalToTransformed(offset: Int): Int =
+                    (offset + promptLength).coerceAtMost(transformedText.length)
+
+                override fun transformedToOriginal(offset: Int): Int =
+                    (offset - promptLength).coerceIn(0, text.length)
+            },
+        )
     }
 }
 
@@ -4792,9 +4863,8 @@ private fun SettingsScreen(
     }
     val visibleSections = sections.filter { section ->
         val sectionId = section.optString("id")
-        sectionId !in setOf("execution", "discussion") && (
+        sectionId !in setOf("execution", "discussion", "models", "channels", "updates") && (
             sectionId == "skills" ||
-            (sectionId == "models" && state.desktopModels != null) ||
                 fields.any { it.optString("section") == sectionId }
             )
     }
@@ -4821,6 +4891,17 @@ private fun SettingsScreen(
                             ),
                             onClick = { onOpenPage("about") },
                         )
+                    }
+                }
+                if (state.desktopModels != null) {
+                    item {
+                        SectionCard(stringResource(R.string.settings_models_section)) {
+                            SettingsMenuRow(
+                                title = stringResource(R.string.settings_models_title),
+                                subtitle = stringResource(R.string.settings_models_description),
+                                onClick = { onOpenPage("models") },
+                            )
+                        }
                     }
                 }
                 item {
@@ -5010,6 +5091,7 @@ private fun SettingsScreen(
 
 @Composable
 private fun AboutUpdateScreen(currentVersion: String) {
+    val runtimePackageName = "ai.cyrene.mobile.runtime"
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var checking by remember { mutableStateOf(false) }
@@ -5018,42 +5100,91 @@ private fun AboutUpdateScreen(currentVersion: String) {
     var downloading by remember { mutableStateOf(false) }
     var downloadedBytes by remember { mutableStateOf(0L) }
     var totalBytes by remember { mutableStateOf(0L) }
-    var downloadedApk by remember { mutableStateOf<File?>(null) }
-    var pendingInstallApk by remember { mutableStateOf<File?>(null) }
+    var downloadedMainApk by remember { mutableStateOf<File?>(null) }
+    var downloadedRuntimeApk by remember { mutableStateOf<File?>(null) }
+    var pendingMainApk by remember { mutableStateOf<File?>(null) }
+    var pendingRuntimeApk by remember { mutableStateOf<File?>(null) }
     var actionError by remember { mutableStateOf<Int?>(null) }
+
+    val mainInstallerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        pendingMainApk = null
+        pendingRuntimeApk = null
+    }
+
+    val runtimeInstallerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val runtimeApk = pendingRuntimeApk
+        val mainApk = pendingMainApk
+        if (runtimeApk != null && isApkVersionInstalled(context, runtimeApk, runtimePackageName)) {
+            pendingRuntimeApk = null
+            if (mainApk != null) {
+                runCatching { mainInstallerLauncher.launch(apkInstallerIntent(context, mainApk)) }
+                    .onFailure { actionError = R.string.settings_update_install_failed }
+            }
+        } else if (runtimeApk != null) {
+            pendingMainApk = null
+            pendingRuntimeApk = null
+            actionError = R.string.settings_update_runtime_install_cancelled
+        }
+    }
+
+    val launchPendingInstallation: () -> Unit = {
+        val mainApk = pendingMainApk
+        val runtimeApk = pendingRuntimeApk
+        when {
+            mainApk == null -> Unit
+            runtimeApk != null && !isApkVersionInstalled(context, runtimeApk, runtimePackageName) ->
+                runCatching { runtimeInstallerLauncher.launch(apkInstallerIntent(context, runtimeApk)) }
+                    .onFailure { actionError = R.string.settings_update_install_failed }
+            else -> runCatching { mainInstallerLauncher.launch(apkInstallerIntent(context, mainApk)) }
+                .onFailure { actionError = R.string.settings_update_install_failed }
+        }
+    }
 
     val installPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) {
-        val apk = pendingInstallApk
-        if (apk != null && canInstallPackages(context)) {
-            runCatching { launchApkInstaller(context, apk) }
-                .onFailure { actionError = R.string.settings_update_install_failed }
-            pendingInstallApk = null
-        } else if (apk != null) {
+        if (canInstallPackages(context)) {
+            launchPendingInstallation()
+        } else if (pendingMainApk != null) {
             actionError = R.string.settings_update_install_permission
         }
     }
 
-    val requestInstallation: (File) -> Unit = { apk ->
+    val requestInstallation: (File, File?) -> Unit = { mainApk, runtimeApk ->
         actionError = null
         when {
-            !isCyreneApk(context, apk) -> {
+            !isExpectedApk(context, mainApk, context.packageName) ||
+                (runtimeApk != null && !isExpectedApk(context, runtimeApk, runtimePackageName)) -> {
                 actionError = R.string.settings_update_invalid_apk
             }
-            canInstallPackages(context) -> {
-                runCatching { launchApkInstaller(context, apk) }
-                    .onFailure { actionError = R.string.settings_update_install_failed }
-            }
             else -> {
-                pendingInstallApk = apk
-                actionError = R.string.settings_update_install_permission
-                val permissionIntent = Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${context.packageName}"),
-                )
-                runCatching { installPermissionLauncher.launch(permissionIntent) }
-                    .onFailure { actionError = R.string.settings_update_install_failed }
+                pendingMainApk = mainApk
+                pendingRuntimeApk = runtimeApk
+                if (canInstallPackages(context)) {
+                    if (runtimeApk != null &&
+                        !isApkVersionInstalled(context, runtimeApk, runtimePackageName)
+                    ) {
+                        runCatching {
+                            runtimeInstallerLauncher.launch(apkInstallerIntent(context, runtimeApk))
+                        }.onFailure { actionError = R.string.settings_update_install_failed }
+                    } else {
+                        runCatching {
+                            mainInstallerLauncher.launch(apkInstallerIntent(context, mainApk))
+                        }.onFailure { actionError = R.string.settings_update_install_failed }
+                    }
+                } else {
+                    actionError = R.string.settings_update_install_permission
+                    val permissionIntent = Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}"),
+                    )
+                    runCatching { installPermissionLauncher.launch(permissionIntent) }
+                        .onFailure { actionError = R.string.settings_update_install_failed }
+                }
             }
         }
     }
@@ -5074,7 +5205,10 @@ private fun AboutUpdateScreen(currentVersion: String) {
         downloading -> progress?.let {
             stringResource(R.string.settings_update_downloading, (it * 100).roundToInt())
         } ?: stringResource(R.string.settings_update_downloading_unknown)
-        downloadedApk != null -> stringResource(R.string.settings_update_downloaded)
+        downloadedMainApk != null -> stringResource(
+            if (downloadedRuntimeApk != null) R.string.settings_update_both_downloaded
+            else R.string.settings_update_downloaded,
+        )
         checkFailed -> stringResource(R.string.settings_update_failed)
         result is UpdateCheckResult.UpdateAvailable ->
             stringResource(R.string.settings_update_available)
@@ -5090,7 +5224,8 @@ private fun AboutUpdateScreen(currentVersion: String) {
             checkFailed = false
             actionError = null
             result = null
-            downloadedApk = null
+            downloadedMainApk = null
+            downloadedRuntimeApk = null
             scope.launch {
                 runCatching { GithubUpdateService.check(currentVersion) }
                     .onSuccess { result = it }
@@ -5102,7 +5237,10 @@ private fun AboutUpdateScreen(currentVersion: String) {
 
     val primaryAction: () -> Unit = {
         when {
-            downloadedApk != null -> requestInstallation(requireNotNull(downloadedApk))
+            downloadedMainApk != null -> requestInstallation(
+                requireNotNull(downloadedMainApk),
+                downloadedRuntimeApk,
+            )
             availableRelease?.apkUrl != null -> {
                 downloading = true
                 downloadedBytes = 0L
@@ -5110,14 +5248,37 @@ private fun AboutUpdateScreen(currentVersion: String) {
                 actionError = null
                 scope.launch {
                     runCatching {
-                        ApkUpdateDownloader.download(context, availableRelease) { downloadProgress ->
-                            downloadedBytes = downloadProgress.downloadedBytes
-                            totalBytes = downloadProgress.totalBytes
+                        val assets = listOfNotNull(
+                            availableRelease.runtimeApk,
+                            availableRelease.mainApk,
+                        )
+                        var runtimeFile: File? = null
+                        var mainFile: File? = null
+                        assets.forEachIndexed { index, asset ->
+                            val file = ApkUpdateDownloader.download(
+                                context,
+                                availableRelease,
+                                asset,
+                            ) { downloadProgress ->
+                                if (downloadProgress.totalBytes > 0L) {
+                                    val assetProgress = downloadProgress.downloadedBytes.toDouble() /
+                                        downloadProgress.totalBytes.toDouble()
+                                    downloadedBytes = ((index + assetProgress) * 1_000_000L).toLong()
+                                    totalBytes = assets.size * 1_000_000L
+                                } else {
+                                    downloadedBytes = 0L
+                                    totalBytes = 0L
+                                }
+                            }
+                            if (asset == availableRelease.runtimeApk) runtimeFile = file
+                            if (asset == availableRelease.mainApk) mainFile = file
                         }
-                    }.onSuccess { apk ->
-                        downloadedApk = apk
+                        requireNotNull(mainFile) to runtimeFile
+                    }.onSuccess { (mainApk, runtimeApk) ->
+                        downloadedMainApk = mainApk
+                        downloadedRuntimeApk = runtimeApk
                         downloading = false
-                        requestInstallation(apk)
+                        requestInstallation(mainApk, runtimeApk)
                     }.onFailure {
                         downloading = false
                         actionError = R.string.settings_update_download_failed
@@ -5138,13 +5299,19 @@ private fun AboutUpdateScreen(currentVersion: String) {
     }
 
     val primaryLabel = when {
-        downloadedApk != null -> stringResource(R.string.settings_update_install)
+        downloadedMainApk != null -> stringResource(
+            if (downloadedRuntimeApk != null) R.string.settings_update_install_both
+            else R.string.settings_update_install,
+        )
         checking -> stringResource(R.string.settings_update_checking)
         downloading -> progress?.let {
             stringResource(R.string.settings_update_downloading, (it * 100).roundToInt())
         } ?: stringResource(R.string.settings_update_downloading_unknown)
-        availableRelease?.apkUrl != null ->
-            stringResource(R.string.settings_update_download_version, availableRelease.version)
+        availableRelease?.apkUrl != null -> stringResource(
+            if (availableRelease.runtimeApk != null) R.string.settings_update_download_both_version
+            else R.string.settings_update_download_version,
+            availableRelease.version,
+        )
         availableRelease != null -> stringResource(R.string.settings_update_open_release)
         else -> stringResource(R.string.settings_update_check_action)
     }
@@ -5309,12 +5476,9 @@ private fun AboutUpdateScreen(currentVersion: String) {
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
                                     shape = RoundedCornerShape(10.dp),
                                 ) {
-                                    Text(
-                                        notes,
-                                        modifier = Modifier.fillMaxWidth().padding(13.dp),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        lineHeight = 19.sp,
-                                    )
+                                    Box(Modifier.fillMaxWidth().padding(13.dp)) {
+                                        MarkdownMessage(notes)
+                                    }
                                 }
                             }
                         }
@@ -5363,24 +5527,39 @@ private fun canInstallPackages(context: Context): Boolean =
     context.packageManager.canRequestPackageInstalls()
 
 @Suppress("DEPRECATION")
-private fun isCyreneApk(context: Context, apk: File): Boolean {
+private fun isExpectedApk(context: Context, apk: File, expectedPackageName: String): Boolean {
     val archiveInfo = context.packageManager.getPackageArchiveInfo(apk.absolutePath, 0)
-    return apk.isFile && apk.length() > 0L && archiveInfo?.packageName == context.packageName
+    return apk.isFile && apk.length() > 0L && archiveInfo?.packageName == expectedPackageName
 }
 
-private fun launchApkInstaller(context: Context, apk: File) {
+@Suppress("DEPRECATION")
+private fun isApkVersionInstalled(context: Context, apk: File, packageName: String): Boolean {
+    val archiveInfo = context.packageManager.getPackageArchiveInfo(apk.absolutePath, 0) ?: return false
+    if (archiveInfo.packageName != packageName) return false
+    val installedInfo = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(
+                packageName,
+                android.content.pm.PackageManager.PackageInfoFlags.of(0),
+            )
+        } else {
+            context.packageManager.getPackageInfo(packageName, 0)
+        }
+    }.getOrNull() ?: return false
+    return installedInfo.longVersionCode >= archiveInfo.longVersionCode
+}
+
+private fun apkInstallerIntent(context: Context, apk: File): Intent {
     val uri = FileProvider.getUriForFile(
         context,
         "${context.packageName}.update-files",
         apk,
     )
-    context.startActivity(
-        Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        },
-    )
+    return Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        putExtra(Intent.EXTRA_RETURN_RESULT, true)
+    }
 }
 
 @Suppress("DEPRECATION")
@@ -5452,11 +5631,19 @@ private fun oauthModelId(candidate: JSONObject): String = candidate.optString("m
     .ifBlank { candidate.optString("slug") }
     .trim()
 
-private fun oauthModelReasoning(candidate: JSONObject?): String = candidate
-    ?.optString("defaultReasoningEffort")
-    .orEmpty()
-    .ifBlank { candidate?.optString("default_reasoning_effort").orEmpty() }
-    .trim()
+private fun oauthModelReasoning(candidate: JSONObject?): String = oauthReasoningEffort(
+    candidate?.opt("defaultReasoningEffort")
+        ?: candidate?.opt("default_reasoning_effort"),
+)
+
+private fun oauthReasoningEffort(value: Any?): String = when (value) {
+    is JSONObject -> value.optString("reasoningEffort")
+        .ifBlank { value.optString("reasoning_effort") }
+        .ifBlank { value.optString("value") }
+        .ifBlank { value.optString("id") }
+    null, JSONObject.NULL -> ""
+    else -> value.toString()
+}.trim()
 
 @Composable
 private fun ModelSettingsCard(
@@ -5493,6 +5680,11 @@ private fun ModelSettingsCard(
             codexModel?.optString("reasoning_effort").orEmpty().ifBlank {
                 oauthModelReasoning(selectedOAuthModel)
             },
+        )
+    }
+    var selectedSource by remember(models.toString()) {
+        mutableStateOf(
+            if (models.optString("source", "custom") == "codex") "codex" else "custom",
         )
     }
     var editTarget by remember { mutableStateOf<ModelEditTarget?>(null) }
@@ -5718,47 +5910,42 @@ private fun ModelSettingsCard(
         )
         ChoiceRow(
             stringResource(R.string.settings_model_custom),
-            models.optString("source", "custom") == "custom",
+            selectedSource == "custom",
             enabled = !busy && !oauthBusy,
         ) {
+            selectedSource = "custom"
             model.updateDesktopModels(
                 JSONObject(models.toString()).put("source", "custom"),
             )
         }
-        if (codexModel != null) {
-            ChoiceRow(
-                stringResource(R.string.settings_model_codex),
-                models.optString("source", "custom") == "codex",
-                enabled = !busy && !oauthBusy,
-            ) {
-                model.updateDesktopModels(
-                    JSONObject(models.toString()).put("source", "codex"),
-                )
-            }
-        } else if (oauthAvailable) {
-            Text(
-                stringResource(R.string.settings_model_oauth_not_configured),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+        ChoiceRow(
+            stringResource(R.string.settings_model_openai_oauth_title),
+            selectedSource == "codex",
+            enabled = !busy && !oauthBusy,
+        ) {
+            selectedSource = "codex"
+            model.updateDesktopModels(
+                JSONObject(models.toString()).put("source", "codex"),
             )
         }
         HorizontalDivider(Modifier.padding(vertical = 3.dp))
-        Text(
-            stringResource(R.string.settings_model_openai_oauth_title),
-            fontWeight = FontWeight.Medium,
-        )
-        Text(
-            if (oauthConnected && oauthAccountLabel.isNotBlank()) {
-                oauthAccountLabel
-            } else if (oauthConnected) {
-                stringResource(R.string.settings_model_oauth_connected)
-            } else {
-                stringResource(R.string.settings_model_oauth_hint)
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (!oauthConnected) {
+        if (selectedSource == "codex") {
+            Text(
+                stringResource(R.string.settings_model_openai_oauth_title),
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                if (oauthConnected && oauthAccountLabel.isNotBlank()) {
+                    oauthAccountLabel
+                } else if (oauthConnected) {
+                    stringResource(R.string.settings_model_oauth_connected)
+                } else {
+                    stringResource(R.string.settings_model_oauth_hint)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!oauthConnected) {
             OutlinedButton(
                 onClick = model::startDesktopOpenAiOAuthLogin,
                 enabled = !busy && !oauthBusy && oauthAvailable,
@@ -5776,17 +5963,19 @@ private fun ModelSettingsCard(
                     color = MaterialTheme.colorScheme.error,
                 )
             }
-        } else if (oauthModels.isNotEmpty()) {
+            } else if (oauthModels.isNotEmpty()) {
             val selected = oauthModels.firstOrNull { oauthModelId(it) == oauthSelection }
             val effortOptions = buildList {
                 selected?.optJSONArray("supportedReasoningEfforts")?.let { values ->
                     (0 until values.length()).forEach { index ->
-                        values.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                        oauthReasoningEffort(values.opt(index))
+                            .takeIf(String::isNotBlank)?.let(::add)
                     }
                 }
                 selected?.optJSONArray("supported_reasoning_efforts")?.let { values ->
                     (0 until values.length()).forEach { index ->
-                        values.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                        oauthReasoningEffort(values.opt(index))
+                            .takeIf(String::isNotBlank)?.let(::add)
                     }
                 }
                 oauthReasoning.takeIf(String::isNotBlank)?.let(::add)
@@ -5838,17 +6027,15 @@ private fun ModelSettingsCard(
                         stringResource(R.string.settings_model_reasoning),
                         style = MaterialTheme.typography.labelMedium,
                     )
-                    if (effortOptions.size > 1) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            effortOptions.forEach { effort ->
-                                FilterChip(
-                                    selected = effectiveOAuthReasoning == effort,
-                                    onClick = { oauthReasoning = effort },
-                                    label = { Text(effort) },
-                                    enabled = !busy && !oauthBusy,
-                                )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        effortOptions.forEach { effort ->
+                            FilterChip(
+                                selected = effectiveOAuthReasoning == effort,
+                                onClick = { oauthReasoning = effort },
+                                label = { Text(effort) },
+                                enabled = !busy && !oauthBusy,
+                            )
                             }
-                        }
                     }
                 }
                 Button(
@@ -5874,7 +6061,8 @@ private fun ModelSettingsCard(
                     enabled = !busy && !oauthBusy,
                 ) { Text(stringResource(R.string.settings_model_oauth_logout)) }
             }
-        }
+            }
+        } else {
         Text(
             stringResource(R.string.settings_model_primary_and_fallbacks),
             fontWeight = FontWeight.Medium,
@@ -5924,6 +6112,7 @@ private fun ModelSettingsCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        }
     }
 }
 
@@ -6186,14 +6375,15 @@ private fun ConversationMessage(
         return
     }
     val trace = message.optJSONArray("trace")
+    val isActivity = message.optBoolean("activityCard")
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        if (trace != null && trace.length() > 0) {
+        if ((trace != null && trace.length() > 0) || isActivity) {
             ExecutionCard(
-                entries = List(trace.length()) { trace.optJSONObject(it) ?: JSONObject() },
-                running = false,
+                entries = List(trace?.length() ?: 0) { trace?.optJSONObject(it) ?: JSONObject() },
+                running = message.optBoolean("runtimeActivityActive"),
+                reasoning = message.optString("reasoning"),
+                provider = message.optString("provider"),
             )
-        } else if (message.optBoolean("activityCard") && content.isBlank()) {
-            ExecutionCard(entries = emptyList(), running = false)
         }
         if (content.isNotBlank()) {
             AssistantMessage(
@@ -6671,14 +6861,38 @@ private fun decodeSampledBitmap(path: String, maxDimension: Int): Bitmap? {
 @Composable
 private fun MarkdownMessage(content: String) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
-    val markwon = remember(context) { Markwon.create(context) }
+    val tableCellPadding = with(density) { 8.dp.roundToPx() }
+    val tableBorderWidth = with(density) { 1.dp.roundToPx() }
+    val tableBorderColor = MaterialTheme.colorScheme.outlineVariant.toArgb()
+    val tableHeaderColor = MaterialTheme.colorScheme.surfaceVariant.toArgb()
+    val tableOddRowColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .28f).toArgb()
+    val markwon = remember(
+        context,
+        tableCellPadding,
+        tableBorderWidth,
+        tableBorderColor,
+        tableHeaderColor,
+        tableOddRowColor,
+    ) {
+        val tableTheme = TableTheme.buildWithDefaults(context)
+            .tableCellPadding(tableCellPadding)
+            .tableBorderWidth(tableBorderWidth)
+            .tableBorderColor(tableBorderColor)
+            .tableHeaderRowBackgroundColor(tableHeaderColor)
+            .tableOddRowBackgroundColor(tableOddRowColor)
+            .build()
+        Markwon.builder(context)
+            .usePlugin(TablePlugin.create(tableTheme))
+            .usePlugin(MovementMethodPlugin.create(TableAwareMovementMethod.create()))
+            .build()
+    }
     AndroidView(
         factory = {
             TextView(it).apply {
                 setTextIsSelectable(true)
-                movementMethod = LinkMovementMethod.getInstance()
                 includeFontPadding = false
                 textSize = 16f
                 setLineSpacing(0f, 1.42f)
@@ -6695,10 +6909,26 @@ private fun MarkdownMessage(content: String) {
 }
 
 @Composable
-private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
+private fun ExecutionCard(
+    entries: List<JSONObject>,
+    running: Boolean,
+    reasoning: String = "",
+    provider: String = "",
+) {
     val normalized = normalizeTraceEntries(entries)
+    val canShowReasoning = reasoning.isNotBlank() && provider != "codex_oauth"
+    val canExpand = normalized.isNotEmpty() || canShowReasoning
+    // Local sessions refresh while a run is observed. The card remains at the
+    // same composition position, so changing trace snapshots must not collapse
+    // a user-opened card on every poll.
+    var expanded by remember { mutableStateOf(false) }
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (canExpand) Modifier.clickable { expanded = !expanded }
+                else Modifier,
+            ),
         color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = .72f),
         shape = RoundedCornerShape(13.dp),
         border = androidx.compose.foundation.BorderStroke(
@@ -6716,26 +6946,38 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                 fontSize = 15.sp,
                 color = MaterialTheme.colorScheme.onTertiaryContainer,
             )
+            if (expanded && canShowReasoning) {
+                Text(
+                    reasoning,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = .82f),
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    maxLines = 12,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (normalized.isEmpty()) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (running) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(17.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.tertiary,
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (running) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(17.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.tertiary,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Text(
+                            stringResource(
+                                if (running) R.string.chat_thinking else R.string.chat_execution_complete
+                            ),
+                            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = .78f),
+                            fontSize = 14.sp,
                         )
-                        Spacer(Modifier.width(10.dp))
                     }
-                    Text(
-                        stringResource(
-                            if (running) R.string.chat_thinking else R.string.chat_execution_complete
-                        ),
-                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = .78f),
-                        fontSize = 14.sp,
-                    )
-                }
             } else {
-                normalized.forEach { entry ->
+                val visibleEntries = if (expanded) normalized else normalized.takeLast(3)
+                visibleEntries.forEach { entry ->
+                    val localizedLabel = localizedTraceLabel(entry.label)
                     Row(verticalAlignment = Alignment.Top) {
                         if (entry.running) {
                             CircularProgressIndicator(
@@ -6754,7 +6996,7 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                         }
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            entry.label,
+                            localizedLabel,
                             color = MaterialTheme.colorScheme.onTertiaryContainer,
                             fontWeight = FontWeight.Medium,
                             fontSize = 14.sp,
@@ -6762,9 +7004,50 @@ private fun ExecutionCard(entries: List<JSONObject>, running: Boolean) {
                         )
                     }
                 }
+                if (!expanded && normalized.size > visibleEntries.size) {
+                    Text(
+                        stringResource(
+                            R.string.chat_execution_more,
+                            normalized.size - visibleEntries.size,
+                        ),
+                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = .72f),
+                        fontSize = 12.sp,
+                    )
+                }
             }
         }
     }
+}
+
+@Composable
+private fun localizedTraceLabel(label: String): String {
+    val tool = label.substringBefore("（")
+    val suffix = label.removePrefix(tool)
+    val resource = when (tool) {
+        "Bash", "bash", "exec", "exec_command", "执行命令" -> R.string.tool_name_bash
+        "Read", "read", "read_file", "读取文件" -> R.string.tool_name_read
+        "Write", "write", "write_file" -> R.string.tool_name_write
+        "Edit", "edit", "edit_file" -> R.string.tool_name_edit
+        "Glob", "glob" -> R.string.tool_name_glob
+        "Grep", "grep" -> R.string.tool_name_grep
+        "WebFetch", "web_fetch" -> R.string.tool_name_web_fetch
+        "WebSearch", "web_search", "search_web", "网络搜索" -> R.string.tool_name_web_search
+        "browser_tools" -> R.string.tool_name_browser_tools
+        "code_tools" -> R.string.tool_name_code_tools
+        "delivery_tools" -> R.string.tool_name_delivery_tools
+        "desktop_tools" -> R.string.tool_name_desktop_tools
+        "entity_tools" -> R.string.tool_name_entity_tools
+        "integration_tools" -> R.string.tool_name_integration_tools
+        "knowledge_tools" -> R.string.tool_name_knowledge_tools
+        "map_tools" -> R.string.tool_name_map_tools
+        "memory_tools" -> R.string.tool_name_memory_tools
+        "remote_tools" -> R.string.tool_name_remote_tools
+        "skill_tools" -> R.string.tool_name_skill_tools
+        "subagent_tools" -> R.string.tool_name_subagent_tools
+        "task_tools" -> R.string.tool_name_task_tools
+        else -> null
+    }
+    return (resource?.let { stringResource(it) } ?: tool) + suffix
 }
 
 private data class TraceDisplay(
@@ -6776,6 +7059,10 @@ private data class TraceDisplay(
 private fun normalizeTraceEntries(entries: List<JSONObject>): List<TraceDisplay> {
     val byId = linkedMapOf<String, JSONObject>()
     entries.forEachIndexed { index, item ->
+        val hiddenTool = item.optString("tool") in setOf(
+            "use_tools", "quit", "send_message", "update_plan_progress",
+        )
+        if (hiddenTool) return@forEachIndexed
         val id = item.optString("toolCallId").ifBlank {
             item.optString("tool_call_id").ifBlank { "trace-$index" }
         }
@@ -6787,26 +7074,56 @@ private fun normalizeTraceEntries(entries: List<JSONObject>): List<TraceDisplay>
         }
     }
     return byId.values.map { item ->
+        val type = item.optString("type")
         val tool = item.optString("text").ifBlank {
             item.optString("tool").ifBlank { item.optString("name") }
         }
-        val preview = item.optString("preview").ifBlank {
-            item.optString("query").ifBlank { item.optString("detail") }
+        val preview = if (type == "phase_transition") "" else item.optString("preview").ifBlank {
+            item.optString("label").ifBlank {
+                item.optString("query").ifBlank {
+                    item.optString("result_preview").ifBlank {
+                        item.optString("message").ifBlank {
+                            item.optString("task").ifBlank { traceArgsPreview(item.optJSONObject("args")) }
+                        }
+                    }
+                }
+            }
         }
-        val type = item.optString("type")
         val status = item.optString("status")
-        val displayTool = when (tool.lowercase()) {
+        val displayTool = when (type) {
+            "phase_transition" -> item.optString("detail").ifBlank {
+                listOf(item.optString("from"), item.optString("to"))
+                    .filter(String::isNotBlank).joinToString(" → ")
+            }.ifBlank { "阶段切换" }
+            "plan" -> "执行计划已${if (status == "rejected") "拒绝" else "确认"}"
+            "plan_progress" -> "计划步骤 ${item.optInt("step")}：${status.ifBlank { "更新" }}"
+            "auto_review", "permission_decision" -> if (item.optBoolean("approved")) {
+                "权限审查已通过"
+            } else {
+                "权限审查未通过"
+            }
+            "subagent_update" -> "子 Agent ${item.optString("agent_id")}：${status.ifBlank { "更新" }}"
+            else -> when (tool.lowercase()) {
             "websearch", "web_search", "search_web" -> "网络搜索"
             "read", "read_file" -> "读取文件"
             "bash", "exec", "exec_command" -> "执行命令"
             else -> tool.ifBlank { "工具调用" }
+            }
         }
         TraceDisplay(
             label = if (preview.isBlank()) displayTool else "$displayTool（$preview）",
-            running = status == "running" || type.endsWith("started"),
+            running = status == "running" || type.endsWith("started") || type.endsWith("progress"),
             failed = item.optBoolean("failed") || status == "failed" || type.endsWith("failed"),
         )
     }
+}
+
+private fun traceArgsPreview(args: JSONObject?): String {
+    if (args == null) return ""
+    return args.keys().asSequence().take(3).mapNotNull { key ->
+        val value = args.opt(key)?.toString()?.replace(Regex("\\s+"), " ")?.take(80).orEmpty()
+        value.takeIf(String::isNotBlank)?.let { "$key: $it" }
+    }.joinToString(" · ").take(220)
 }
 
 private fun formatChatTime(raw: String): String {
@@ -6840,6 +7157,8 @@ private fun formatChatListTimestamp(raw: String): String {
 
 @Composable
 private fun localizedStatus(raw: String): String = when (raw.lowercase()) {
+    "local" -> stringResource(R.string.local_agent_device_only)
+    "ready" -> stringResource(R.string.local_agent_ready)
     "idle" -> stringResource(R.string.server_status_idle)
     "active" -> stringResource(R.string.server_status_active)
     "running" -> stringResource(R.string.server_status_running)
@@ -6868,8 +7187,13 @@ private fun displayMessageContent(raw: String): String {
 
 @Composable
 private fun EmptyCard(text: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFEEF0F7))) {
-        Text(text, Modifier.fillMaxWidth().padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+    ) {
+        Text(text, Modifier.fillMaxWidth().padding(20.dp))
     }
 }
 

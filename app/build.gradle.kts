@@ -12,8 +12,8 @@ android {
         applicationId = "ai.cyrene.mobile"
         minSdk = 28
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -46,6 +46,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":runtime-protocol"))
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
@@ -57,6 +58,7 @@ dependencies {
     implementation(libs.coroutines.android)
     implementation(libs.bouncycastle)
     implementation(libs.markwon.core)
+    implementation(libs.markwon.ext.tables)
     implementation(libs.androidx.core.ktx)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)

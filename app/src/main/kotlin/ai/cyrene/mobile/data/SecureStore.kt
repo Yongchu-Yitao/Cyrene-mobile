@@ -33,7 +33,19 @@ class SecureStore(context: Context) {
                     b64UrlDecode(raw.getString("exchange")),
                 )
             }.getOrElse {
-                preferences.edit().remove("identity_cipher").remove("identity_iv").apply()
+                // Restoring an emulator/device snapshot can roll SharedPreferences
+                // back without rolling Android Keystore back to the matching key.
+                // The old peers and copied provider credentials are then no longer
+                // cryptographically usable and must not be presented as connected.
+                preferences.edit()
+                    .remove("identity_cipher")
+                    .remove("identity_iv")
+                    .remove("peers")
+                    .remove("peer")
+                    .remove("active_peer_id")
+                    .remove(LOCAL_MODELS_CIPHER)
+                    .remove(LOCAL_MODELS_IV)
+                    .apply()
                 createIdentity()
             }
         }
@@ -144,9 +156,77 @@ class SecureStore(context: Context) {
         preferences.edit().putString("permission_mode", value.wireValue).apply()
     }
 
+    /**
+     * Stores the complete Provider configuration used by local conversations.
+     * The payload can contain API credentials and is therefore always wrapped by
+     * an Android Keystore-backed AES-GCM key. It must never be copied to the
+     * unencrypted desktop cache or UI state.
+     */
+    fun saveLocalModelConfiguration(value: JSONObject) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, masterKey())
+        val plaintext = value.toString().toByteArray(Charsets.UTF_8)
+        preferences.edit()
+            .putString(LOCAL_MODELS_CIPHER, b64Url(cipher.doFinal(plaintext)))
+            .putString(LOCAL_MODELS_IV, b64Url(cipher.iv))
+            .apply()
+        plaintext.fill(0)
+    }
+
+    fun localModelConfiguration(): JSONObject? {
+        val encrypted = preferences.getString(LOCAL_MODELS_CIPHER, null) ?: return null
+        val iv = preferences.getString(LOCAL_MODELS_IV, null) ?: return null
+        return runCatching {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, masterKey(), GCMParameterSpec(128, b64UrlDecode(iv)))
+            val plaintext = cipher.doFinal(b64UrlDecode(encrypted))
+            try {
+                JSONObject(plaintext.toString(Charsets.UTF_8))
+            } finally {
+                plaintext.fill(0)
+            }
+        }.getOrNull()
+    }
+
+    fun localModelConfigurationPublic(): JSONObject? = localModelConfiguration()?.let(::redactModelSecrets)
+
+    fun hasRunnableLocalModel(): Boolean {
+        val models = localModelConfiguration() ?: return false
+        if (models.optString("source", "custom") != "custom") return false
+        val custom = models.optJSONArray("custom_models") ?: return false
+        if (custom.length() == 0) return false
+        val primary = custom.optJSONObject(0) ?: return false
+        return primary.optString("model").isNotBlank() &&
+            primary.optString("base_url").startsWith("http") &&
+            primary.optString("api_key").isNotBlank()
+    }
+
     companion object {
         private const val KEY_ALIAS = "cyrene_mobile_identity_master_v1"
+        private const val LOCAL_MODELS_CIPHER = "local_models_cipher"
+        private const val LOCAL_MODELS_IV = "local_models_iv"
     }
+}
+
+private fun redactModelSecrets(value: JSONObject): JSONObject {
+    val result = JSONObject(value.toString())
+    listOf("custom_models", "vision_models").forEach { key ->
+        val array = result.optJSONArray(key) ?: return@forEach
+        for (index in 0 until array.length()) {
+            array.optJSONObject(index)?.let { candidate ->
+                val configured = candidate.optString("api_key").isNotBlank()
+                candidate.remove("api_key")
+                candidate.put("api_key_configured", configured)
+            }
+        }
+    }
+    result.optJSONObject("secondary_model")?.let { candidate ->
+        val configured = candidate.optString("api_key").isNotBlank()
+        candidate.remove("api_key")
+        candidate.put("api_key_configured", configured)
+    }
+    result.optJSONObject("codex_model")?.remove("api_key")
+    return result
 }
 
 fun Peer.toJson(): JSONObject = JSONObject()

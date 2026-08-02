@@ -112,6 +112,26 @@ object CyreneCrypto {
         return ByteArray(32).also { generator.generateBytes(it, 0, it.size) }
     }
 
+    fun deriveSessionBundleKey(
+        identity: MobileIdentity,
+        peer: Peer,
+        sessionId: String,
+        generation: Long,
+        objectId: String,
+    ): ByteArray {
+        require(sessionId.startsWith("ls_") && generation > 0 && objectId.startsWith("sha256:"))
+        val salt = sha256("$sessionId|$generation".toByteArray())
+        val generator = HKDFBytesGenerator(SHA256Digest())
+        generator.init(
+            HKDFParameters(
+                identity.sharedSecret(b64UrlDecode(peer.exchangePublic)),
+                salt,
+                "cyrene-local-session-object-v1|$objectId".toByteArray(),
+            )
+        )
+        return ByteArray(32).also { generator.generateBytes(it, 0, it.size) }
+    }
+
     fun encrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, plain: ByteArray): ByteArray =
         aead(true, key, nonce, aad, plain)
 
