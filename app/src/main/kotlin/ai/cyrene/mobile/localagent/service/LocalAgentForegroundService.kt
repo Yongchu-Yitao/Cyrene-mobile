@@ -68,7 +68,9 @@ class LocalAgentForegroundService : Service() {
         val dao = LocalAgentDatabase.open(this).dao()
         val sink = DatabaseRuntimeStore(dao, sessionId)
         val runtime = RuntimeCompanionClient(this)
-        val runBudget = RunBudget(20, 50, 30 * 60 * 1000L, 120_000, 32_768, Long.MAX_VALUE, 4, 2)
+        // This remains a runaway-loop safety boundary, not a normal task limit.
+        // Long local tasks routinely need dozens of inspect/edit/verify rounds.
+        val runBudget = RunBudget(100, 250, 60 * 60 * 1000L, 120_000, 32_768, Long.MAX_VALUE, 4, 2)
         sink.checkpoint(
             ai.cyrene.mobile.localagent.runtime.RunSnapshot(
                 runId, sessionId, generation, ai.cyrene.mobile.localagent.model.RunState.READY, runBudget
@@ -88,7 +90,7 @@ class LocalAgentForegroundService : Service() {
             // The ViewModel persists the user message before starting this service so it is
             // immediately visible while QEMU boots. Exclude that final message here because
             // FrozenRunInputs supplies the current input separately.
-            val contextItems = materializedContext(sessionId).dropLast(1)
+            val contextItems = materializedContext(sessionId, excludeLatestMessage = true)
             val outcome = LocalAgentOrchestrator(
                 MobileProviderClient(secure),
                 LocalHarnessToolInvoker(sessionId, generation, runtime, mountedInitially = true),
@@ -121,20 +123,83 @@ class LocalAgentForegroundService : Service() {
         }
     }
 
-    private suspend fun materializedContext(sessionId: String): List<JSONObject> {
+    private suspend fun materializedContext(
+        sessionId: String,
+        excludeLatestMessage: Boolean = false,
+    ): List<JSONObject> {
         val dao = LocalAgentDatabase.open(this).dao()
-        return dao.messages(sessionId, 80).map { message ->
+        val messageEntities = dao.messages(sessionId, 80).let {
+            if (excludeLatestMessage) it.dropLast(1) else it
+        }
+        val savedAssistantMessages = messageEntities
+            .filter { it.role == "assistant" }
+            .map { it.content }
+            .toSet()
+        val messages = messageEntities.map { message ->
             val attachments = if (message.role == "user") {
                 localAgentAttachments(message.attachmentsJson)
             } else {
                 emptyList()
             }
-            JSONObject().put("role", message.role).put(
-                "content",
-                attachmentAwareUserMessage(message.content, attachments),
-            )
+            message.createdAt.toLongOrNull().orEmptyTimestamp() to JSONObject()
+                .put("role", message.role).put(
+                    "content",
+                    attachmentAwareUserMessage(message.content, attachments),
+                )
         }
+        val operationalHistory = dao.traces(sessionId, 200).asReversed().mapNotNull { trace ->
+            val raw = runCatching { JSONObject(trace.payloadJson) }.getOrNull() ?: return@mapNotNull null
+            val content = when (trace.type) {
+                "model_event" -> {
+                    val payload = raw.optJSONObject("payload") ?: return@mapNotNull null
+                    when (raw.optString("type")) {
+                        "tool_call.completed" -> {
+                            val name = payload.optString("name")
+                            if (name in setOf("use_tools", "ask_user", "quit")) return@mapNotNull null
+                            "[Previous local Agent tool call] $name ${payload.optString("arguments_json", "{}").take(4_000)}"
+                        }
+                        "message.completed" -> {
+                            val message = payload.optString("content").take(8_000)
+                            if (message.isBlank() || message in savedAssistantMessages) return@mapNotNull null
+                            "[Previous local Agent progress message] $message"
+                        }
+                        else -> return@mapNotNull null
+                    }
+                }
+                "tool_result" -> {
+                    val status = raw.optString("status", "unknown")
+                    val summary = raw.optString("summary")
+                    val errorType = if (raw.isNull("error_type")) "" else raw.optString("error_type")
+                    val inline = if (raw.isNull("inline_payload")) "" else raw.optString("inline_payload")
+                    buildString {
+                        append("[Previous local Agent tool result] status=").append(status)
+                        if (errorType.isNotBlank()) append(" error_type=").append(errorType)
+                        if (summary.isNotBlank()) append(" summary=").append(summary)
+                        if (inline.isNotBlank()) append(" payload=").append(inline.take(4_000))
+                    }
+                }
+                else -> return@mapNotNull null
+            }
+            trace.createdAt.toLongOrNull().orEmptyTimestamp() to JSONObject()
+                .put("role", "assistant")
+                .put("content", content)
+        }
+        val ordered = (messages + operationalHistory)
+            .sortedBy { it.first }
+        var contextChars = 0
+        val selected = mutableListOf<Pair<Long, JSONObject>>()
+        for (item in ordered.asReversed()) {
+            val chars = item.second.optString("content").length
+            if (selected.isNotEmpty() &&
+                (selected.size >= MAX_CONTEXT_ITEMS || contextChars + chars > MAX_CONTEXT_CHARS)
+            ) break
+            selected += item
+            contextChars += chars
+        }
+        return selected.asReversed().map { it.second }
     }
+
+    private fun Long?.orEmptyTimestamp(): Long = this ?: 0L
 
     private suspend fun stageAttachments(
         runtime: RuntimeCompanionClient,
@@ -228,6 +293,8 @@ class LocalAgentForegroundService : Service() {
     }
 
     companion object {
+        private const val MAX_CONTEXT_ITEMS = 200
+        private const val MAX_CONTEXT_CHARS = 300_000
         private const val CHANNEL_ID = "local_agent_runs"
         private const val NOTIFICATION_ID = 4102
         const val ACTION_START = "ai.cyrene.mobile.localagent.START"

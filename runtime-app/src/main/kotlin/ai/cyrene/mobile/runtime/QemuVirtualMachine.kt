@@ -101,7 +101,15 @@ class QemuVirtualMachine(
         }
         connect(deadlineEpochMs)
         started = true
-        return waitForReady(deadlineEpochMs)
+        val health = waitForReady(deadlineEpochMs)
+        // Linux's canonical TTY discipline truncates lines around 4 KiB. The
+        // serial protocol carries base64 commands on one line, so switch the
+        // guest console to raw line delivery before accepting real work.
+        val serialSetup = execute("stty -icanon -echo min 1 time 0 </dev/ttyS0", deadlineEpochMs)
+        check(serialSetup.exitCode == 0) {
+            "Unable to configure the QEMU command channel: ${serialSetup.stderr.ifBlank { serialSetup.stdout }}"
+        }
+        return health
     }
 
     @Synchronized
@@ -125,6 +133,9 @@ class QemuVirtualMachine(
     @Synchronized
     fun execute(command: String, deadlineEpochMs: Long): VmCommandResult {
         ensureRunning()
+        require(command.toByteArray(Charsets.UTF_8).size <= MAX_COMMAND_BYTES) {
+            "QEMU guest command exceeds the ${MAX_COMMAND_BYTES / 1024} KiB protocol limit"
+        }
         val id = token()
         val payload = Base64.encodeToString(command.toByteArray(), Base64.NO_WRAP)
         send("CYRENE_EXEC $id $payload")
@@ -229,6 +240,7 @@ class QemuVirtualMachine(
     }
 
     companion object {
+        private const val MAX_COMMAND_BYTES = 256 * 1024
         private const val SERIAL_TAG = "CyreneQemuSerial"
     }
 }

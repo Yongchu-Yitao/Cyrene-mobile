@@ -26,7 +26,7 @@ if [ -d /workspace ] && [ -w /workspace ]; then workspace_state=ready; fi
 # The serial channel is a deliberately tiny typed protocol. Commands are
 # base64-encoded so model-provided shell text cannot break the envelope.
 exec </dev/ttyS0 >/dev/ttyS0 2>&1
-stty -echo 2>/dev/null || true
+stty -echo -icanon min 1 time 0 2>/dev/null || true
 printf 'CYRENE_VM_READY alpine-3.24-qemu-x86_64-v2 %s %s\n' "$network_state" "$workspace_state"
 
 while IFS=' ' read -r operation request_id payload; do

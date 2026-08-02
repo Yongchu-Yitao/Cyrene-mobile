@@ -417,17 +417,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return entry
         }
         if (trace.type == "tool_result") {
-            val inline = raw.optString("inline_payload")
+            val inline = if (raw.isNull("inline_payload")) "" else raw.optString("inline_payload")
             val detail = runCatching { JSONObject(inline) }.getOrNull()
-            val preview = detail?.optString("command").orEmpty().ifBlank {
-                detail?.optString("stdout").orEmpty().lineSequence().firstOrNull().orEmpty()
+            val failed = raw.optString("status") !in setOf("success", "completed")
+            val command = detail?.optString("command").orEmpty()
+            val stderr = detail?.optString("stderr").orEmpty().trim()
+            val stdout = detail?.optString("stdout").orEmpty().trim()
+            val exitCode = detail?.takeIf { it.has("exit_code") && !it.isNull("exit_code") }
+                ?.optInt("exit_code")
+            val errorType = if (raw.isNull("error_type")) "" else raw.optString("error_type")
+            val preview = if (failed) buildString {
+                if (command.isNotBlank()) append(command)
+                if (exitCode != null) append(if (isEmpty()) "" else " → ").append("exit ").append(exitCode)
+                if (errorType.isNotBlank()) append(if (isEmpty()) "" else " · ").append(errorType)
+                val error = stderr.ifBlank { raw.optString("summary") }
+                if (error.isNotBlank()) append(if (isEmpty()) "" else ": ").append(error)
+            } else command.ifBlank {
+                stdout.lineSequence().firstOrNull().orEmpty()
             }.ifBlank { raw.optString("summary") }
             return JSONObject()
                 .put("type", "tool_result")
                 .put("toolCallId", raw.optString("call_id"))
                 .put("status", raw.optString("status"))
-                .put("result_preview", preview.take(240))
-                .put("failed", raw.optString("status") !in setOf("success", "completed"))
+                .put("result_preview", preview.take(800))
+                .put("failed", failed)
         }
         return null
     }
@@ -482,16 +495,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val run = localAgentDao.latestRun(sessionId)
         val traces = localAgentDao.traces(sessionId, 50)
         val runEvents = if (run?.state == RunState.FAILED) {
-            val failure = traces.firstOrNull { it.type == "run_failed" }
             listOf(
                 JSONObject()
                     .put("type", "error")
-                    .put(
-                        "message",
-                        failure?.let {
-                            runCatching { JSONObject(it.payloadJson).optString("message") }.getOrNull()
-                        }.orEmpty().ifBlank { text(R.string.chat_run_failed) },
-                    ),
+                    .put("message", localRunFailureMessage(traces)),
             )
         } else if (clearEvents) {
             emptyList()
@@ -521,6 +528,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else -> text(R.string.local_agent_device_only)
             },
         )
+    }
+
+    private fun localRunFailureMessage(
+        traces: List<ai.cyrene.mobile.localagent.database.LocalTraceEntity>,
+    ): String {
+        traces.firstOrNull { it.type == "run_failed" }?.let { failure ->
+            return runCatching { JSONObject(failure.payloadJson).optString("message") }
+                .getOrNull().orEmpty().ifBlank { text(R.string.chat_run_failed) }
+        }
+        traces.firstOrNull { it.type == "run_stopped" }?.let { stopped ->
+            val payload = runCatching { JSONObject(stopped.payloadJson) }.getOrNull() ?: JSONObject()
+            return when (payload.optString("reason")) {
+                "budget_exhausted" -> text(R.string.chat_run_budget_exhausted)
+                "repeated_failure" -> text(R.string.chat_run_repeated_failure)
+                else -> payload.optString("detail").takeIf(String::isNotBlank)
+                    ?.let { text(R.string.chat_run_stopped_detail, it) }
+                    ?: text(R.string.chat_run_failed)
+            }
+        }
+        return text(R.string.chat_run_failed)
     }
 
     private fun observeLocalChat(sessionId: String) {

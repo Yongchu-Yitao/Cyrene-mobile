@@ -186,6 +186,9 @@
     <string name="chat_message_sending">Sending…</string>
     <string name="chat_message_send_failed">Couldn’t send</string>
     <string name="chat_run_failed">Agent reply failed</string>
+    <string name="chat_run_budget_exhausted">This run reached its 100-model-turn or 250-tool-call safety limit. Your work and tool history were saved; send “continue” to resume.</string>
+    <string name="chat_run_repeated_failure">The model returned neither a message nor a tool call twice. The exact tool history was saved; retry or send additional guidance.</string>
+    <string name="chat_run_stopped_detail">Agent stopped: %1$s</string>
     <string name="chat_composer_desktop">Message Cyrene…</string>
     <string name="chat_mode_auto">Auto</string>
     <string name="chat_mode_auto_desc">Review permission requests automatically</string>

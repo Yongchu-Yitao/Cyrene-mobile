@@ -65,6 +65,18 @@ class RuntimeIntegrationProbeActivity : Activity() {
                             timeoutMs = 30_000,
                         )
                         check(execution.status == "success") { execution.message ?: "guest execution failed" }
+                        val longCommand = "printf 'BINDER_LONG_COMMAND_OK\\n'; # " + "y".repeat(12_000)
+                        val longExecution = runtime.submit(
+                            readerSession,
+                            GuestOperation.EXEC_START,
+                            JSONObject().put("command", longCommand),
+                            timeoutMs = 30_000,
+                        )
+                        check(longExecution.status == "success" &&
+                            longExecution.payload.optInt("exit_code", -1) == 0 &&
+                            longExecution.payload.optString("stdout").contains("BINDER_LONG_COMMAND_OK")) {
+                            longExecution.message ?: "long Binder command was truncated"
+                        }
                         val health = runtime.submit(
                             readerSession,
                             GuestOperation.HEALTH_CHECK,
@@ -82,6 +94,8 @@ class RuntimeIntegrationProbeActivity : Activity() {
                                     .put("error_type", traversal.errorType),
                             )
                             .put("execution", execution.payload)
+                            .put("long_command", JSONObject().put("bytes", longCommand.toByteArray().size)
+                                .put("result", longExecution.payload))
                             .put("health", health.payload)
                             .toString()
                     }

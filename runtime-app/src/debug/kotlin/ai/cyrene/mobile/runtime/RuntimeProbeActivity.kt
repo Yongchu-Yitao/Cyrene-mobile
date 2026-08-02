@@ -70,6 +70,20 @@ class RuntimeProbeActivity : Activity() {
                     request(sessionId, GuestOperation.EXEC_START, JSONObject().put("command", command), deadline)
                 )
                 check(execution.status == "success") { execution.message ?: "execution failed" }
+                val longCommand = "printf 'LONG_COMMAND_OK\\n'; # " + "x".repeat(12_000)
+                val longExecution = manager.handle(
+                    request(
+                        sessionId,
+                        GuestOperation.EXEC_START,
+                        JSONObject().put("command", longCommand),
+                        deadline,
+                    )
+                )
+                check(longExecution.status == "success") { longExecution.message ?: "long command failed" }
+                check(longExecution.payload.optInt("exit_code", -1) == 0 &&
+                    longExecution.payload.optString("stdout").contains("LONG_COMMAND_OK")) {
+                    "QEMU serial channel truncated a command larger than the canonical TTY limit"
+                }
                 val health = manager.handle(request(sessionId, GuestOperation.HEALTH_CHECK, JSONObject(), deadline))
                 JSONObject()
                     .put("mount", mount.payload)
@@ -83,6 +97,8 @@ class RuntimeProbeActivity : Activity() {
                     )
                     .put("artifact_export", exported.payload)
                     .put("execution", execution.payload)
+                    .put("long_command", JSONObject().put("bytes", longCommand.toByteArray().size)
+                        .put("result", longExecution.payload))
                     .put("health", health.payload)
                     .toString()
                 }.fold({ it }, { JSONObject().put("error", it.stackTraceToString()).toString() })

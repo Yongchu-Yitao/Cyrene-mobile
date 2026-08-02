@@ -72,7 +72,21 @@ class LocalHarnessToolInvoker(
         val response = runtime.submit(sessionId, operation, arguments, timeoutMs = timeoutMs)
         return if (response.status == "success") {
             val content = response.payload.toString()
-            ToolResult(callId, ToolResultStatus.SUCCESS, "Linux guest operation completed", inlinePayload = bounded(content))
+            val exitCode = if (operation == GuestOperation.EXEC_START) {
+                response.payload.optInt("exit_code", 0)
+            } else 0
+            if (exitCode == 0) {
+                ToolResult(callId, ToolResultStatus.SUCCESS, "Linux guest operation completed", inlinePayload = bounded(content))
+            } else {
+                val stderr = response.payload.optString("stderr").trim()
+                ToolResult(
+                    callId,
+                    ToolResultStatus.ERROR,
+                    "Command exited with code $exitCode${stderr.lineSequence().firstOrNull()?.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()}",
+                    inlinePayload = bounded(content),
+                    errorType = "command_failed",
+                )
+            }
         } else guestFailure(callId, response.errorType, response.message)
     }
 

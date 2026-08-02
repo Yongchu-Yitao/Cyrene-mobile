@@ -12,10 +12,77 @@ import java.net.URI
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 
+internal class ProviderTranscript(initial: JSONArray) {
+    private val items = mutableListOf<JSONObject>()
+    private val observedToolResults = mutableSetOf<String>()
+
+    init { appendAll(initial) }
+
+    @Synchronized
+    fun append(value: JSONObject) { items += JSONObject(value.toString()) }
+
+    @Synchronized
+    fun appendAll(values: JSONArray) {
+        for (index in 0 until values.length()) {
+            values.optJSONObject(index)?.let(::append)
+        }
+    }
+
+    @Synchronized
+    fun appendChatToolResults(results: JSONArray) {
+        for (index in 0 until results.length()) {
+            val result = results.optJSONObject(index) ?: continue
+            val callId = result.optString("call_id")
+            if (callId.isBlank() || !observedToolResults.add(callId)) continue
+            append(JSONObject()
+                .put("role", "tool")
+                .put("tool_call_id", callId)
+                .put("content", structuredToolResult(result)))
+        }
+    }
+
+    @Synchronized
+    fun appendResponsesToolResults(results: JSONArray) {
+        for (index in 0 until results.length()) {
+            val result = results.optJSONObject(index) ?: continue
+            val callId = result.optString("call_id")
+            if (callId.isBlank() || !observedToolResults.add(callId)) continue
+            append(JSONObject()
+                .put("type", "function_call_output")
+                .put("call_id", callId)
+                .put("output", structuredToolResult(result)))
+        }
+    }
+
+    @Synchronized
+    fun snapshot(): JSONArray = JSONArray(items.map { JSONObject(it.toString()) })
+
+    companion object {
+        internal fun structuredToolResult(result: JSONObject): String {
+            fun nullableString(key: String): String? =
+                if (!result.has(key) || result.isNull(key)) null
+                else result.optString(key).takeIf(String::isNotBlank)
+            return JSONObject()
+                .put("status", result.optString("status", "unknown"))
+                .put("summary", result.optString("summary"))
+                .apply {
+                    nullableString("error_type")?.let { put("error_type", it) }
+                    nullableString("inline_payload")?.let { payload ->
+                        put("payload", runCatching { JSONObject(payload) }.getOrElse { payload })
+                    }
+                    nullableString("artifact_ref")?.let { put("artifact_ref", it) }
+                }
+                .toString()
+                .take(128_000)
+        }
+    }
+}
+
 /** Direct, on-device OpenAI-compatible Provider transport for local sessions. */
 class MobileProviderClient(private val store: SecureStore) : LocalModelTransport {
     private val openAiOAuth = MobileOpenAiOAuthClient(store)
-    private val previousAssistantMessages = ConcurrentHashMap<String, JSONObject>()
+    private val chatTranscripts = ConcurrentHashMap<String, ProviderTranscript>()
+    private val responsesTranscripts = ConcurrentHashMap<String, ProviderTranscript>()
 
     override suspend fun start(payload: JSONObject, idempotencyKey: String): JSONObject = complete(payload)
 
@@ -33,9 +100,14 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
             return@withContext completeCodex(payload, configuration)
         }
         val candidate = primaryCandidate(configuration)
+        val transcriptKey = transcriptKey(payload, phase)
+        val transcript = chatTranscripts.computeIfAbsent(transcriptKey) {
+            ProviderTranscript(chatInput(payload, phase))
+        }
+        transcript.appendChatToolResults(payload.optJSONArray("tool_results") ?: JSONArray())
         val request = JSONObject()
             .put("model", candidate.getString("model"))
-            .put("messages", messages(payload, phase))
+            .put("messages", transcript.snapshot())
             .put("tools", if (phase == "decision") decisionTools() else executionTools())
             .put("max_tokens", payload.getJSONObject("limits").optInt("max_output_tokens", 8192).coerceIn(1, 32768))
             .put("stream", false)
@@ -44,7 +116,7 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
             ?: throw IllegalStateException(response.optJSONObject("error")?.optString("message")
                 ?: "模型服务没有返回 choices")
         val assistant = choice.optJSONObject("message") ?: JSONObject()
-        previousAssistantMessages[turnId] = JSONObject(assistant.toString())
+        transcript.append(JSONObject(assistant.toString()))
         val events = JSONArray()
         var sequence = 1
         fun event(type: String, body: JSONObject = JSONObject()) {
@@ -104,27 +176,15 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
         val phase = payload.getString("phase")
         val candidate = models.optJSONObject("codex_model") ?: JSONObject()
         val model = candidate.optString("model").ifBlank { "gpt-5.1-codex" }
-        val input = JSONArray()
-        val sourceItems = payload.optJSONArray("input_items") ?: JSONArray()
-        for (index in 0 until sourceItems.length()) {
-            val source = sourceItems.optJSONObject(index) ?: continue
-            input.put(JSONObject()
-                .put("role", source.optString("role", "user"))
-                .put("content", source.optString("content").take(500_000)))
+        val transcriptKey = transcriptKey(payload, phase)
+        val transcript = responsesTranscripts.computeIfAbsent(transcriptKey) {
+            ProviderTranscript(responsesInput(payload))
         }
-        val toolResults = payload.optJSONArray("tool_results") ?: JSONArray()
-        for (index in 0 until toolResults.length()) {
-            val result = toolResults.optJSONObject(index) ?: continue
-            input.put(JSONObject()
-                .put("type", "function_call_output")
-                .put("call_id", result.optString("call_id"))
-                .put("output", result.optString("inline_payload")
-                    .ifBlank { result.optString("summary") }.take(128_000)))
-        }
+        transcript.appendResponsesToolResults(payload.optJSONArray("tool_results") ?: JSONArray())
         val request = JSONObject()
             .put("model", model)
             .put("instructions", systemPrompt(phase))
-            .put("input", input)
+            .put("input", transcript.snapshot())
             .put("tools", responsesTools(if (phase == "decision") decisionTools() else executionTools()))
             .put("tool_choice", "auto")
             .put("parallel_tool_calls", false)
@@ -142,6 +202,7 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
         }
         event("turn.started", JSONObject().put("phase", phase))
         val output = response.optJSONArray("output") ?: JSONArray()
+        transcript.appendAll(output)
         val text = StringBuilder()
         for (index in 0 until output.length()) {
             val item = output.optJSONObject(index) ?: continue
@@ -216,7 +277,7 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
         }
     }
 
-    private fun messages(payload: JSONObject, phase: String): JSONArray {
+    private fun chatInput(payload: JSONObject, phase: String): JSONArray {
         val result = JSONArray().put(JSONObject().put("role", "system").put("content", systemPrompt(phase)))
         val input = payload.optJSONArray("input_items") ?: JSONArray()
         for (index in 0 until input.length()) {
@@ -224,16 +285,21 @@ class MobileProviderClient(private val store: SecureStore) : LocalModelTransport
             val role = item.optString("role", "user").takeIf { it in setOf("user", "assistant", "tool") } ?: "user"
             result.put(JSONObject().put("role", role).put("content", item.optString("content").take(500_000)))
         }
-        val previousId = payload.optString("previous_model_turn_id")
-        previousAssistantMessages[previousId]?.let { result.put(JSONObject(it.toString())) }
-        val toolResults = payload.optJSONArray("tool_results") ?: JSONArray()
-        for (index in 0 until toolResults.length()) {
-            val item = toolResults.optJSONObject(index) ?: continue
-            result.put(JSONObject().put("role", "tool").put("tool_call_id", item.optString("call_id"))
-                .put("content", item.optString("inline_payload").ifBlank { item.optString("summary") }.take(128_000)))
-        }
         return result
     }
+
+    private fun responsesInput(payload: JSONObject): JSONArray = JSONArray().also { input ->
+        val sourceItems = payload.optJSONArray("input_items") ?: JSONArray()
+        for (index in 0 until sourceItems.length()) {
+            val source = sourceItems.optJSONObject(index) ?: continue
+            input.put(JSONObject()
+                .put("role", source.optString("role", "user"))
+                .put("content", source.optString("content").take(500_000)))
+        }
+    }
+
+    private fun transcriptKey(payload: JSONObject, phase: String) =
+        "${payload.optString("run_id")}:$phase"
 
     private fun post(candidate: JSONObject, body: JSONObject): JSONObject {
         val base = candidate.getString("base_url").trimEnd('/')

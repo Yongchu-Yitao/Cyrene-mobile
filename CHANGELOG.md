@@ -2,6 +2,35 @@
 
 本文记录 Cyrene Mobile 的重要变更。
 
+## 0.2.5 — 2026-08-03
+
+### Agent 多轮上下文与可观测性
+
+- 修复本地 Agent 在第二轮及之后只收到最近一次工具结果、看不到本次运行中更早的工具调用、
+  工具结果和进度消息的问题。OpenAI-compatible Chat Completions 与 OpenAI OAuth Responses
+  现在都维护完整的追加式运行历史，并保证每个工具结果与原始 call ID 配对。
+- 后续消息会从本地 Trace 中恢复此前的工具调用、结果和未保存为最终回答的进度消息；Agent
+  可以继续基于自己已经执行的操作工作，不会在新消息后重新猜测环境状态。
+- 工具结果改为结构化传回模型，明确包含 `status`、`summary`、`error_type`、输出和产物引用；
+  JSON null 不再误传成字符串 `"null"`。
+- Bash 非零退出码不再标记为成功。执行卡片会显示命令、退出码、错误类型与 stderr；运行因预算、
+  无进展或协议错误停止时，界面显示具体的中英文原因，不再统一退化为“Agent 回复失败”。
+
+### 运行预算与 QEMU 命令通道
+
+- 将正常本地任务的安全边界由 20 次模型轮次/50 次工具调用提高到 100/250，并把它明确定位为
+  防止失控循环的最终上限；达到上限时保留完整历史，并提示发送“继续”恢复任务。
+- 修复 QEMU 串口使用 Linux canonical TTY 时约 4 KiB 的单行限制。较长的 Write、Edit、Bash
+  请求此前会被截断并返回 `invalid command payload`；Runtime 启动后现在切换到非 canonical
+  模式，同时保留 256 KiB 的明确协议上限。
+- Debug Runtime 与主 App Binder 探针新增 12 KiB 长命令回归验证，覆盖真实 QEMU Guest、
+  跨会话共享工作区、APK 仓库网络和签名 Binder 链路。
+
+### 版本
+
+- 主 App 版本为 `0.2.5`（versionCode 8），Runtime 版本为 `0.2.5`
+  （versionCode 6）。本次修复同时涉及两个 APK，必须安装同一 Release 中的配套版本。
+
 ## 0.2.4 — 2026-08-03
 
 ### Linux 虚拟机 DNS

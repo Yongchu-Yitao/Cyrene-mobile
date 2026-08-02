@@ -186,6 +186,9 @@
     <string name="chat_message_sending">正在发送…</string>
     <string name="chat_message_send_failed">发送失败</string>
     <string name="chat_run_failed">Agent 回复失败</string>
+    <string name="chat_run_budget_exhausted">本次运行已达到 100 次模型轮次或 250 次工具调用的安全上限。操作与工具历史均已保存；发送“继续”即可接着处理。</string>
+    <string name="chat_run_repeated_failure">模型连续两次既未回复也未调用工具。完整工具历史已保存，请重试或补充指导。</string>
+    <string name="chat_run_stopped_detail">Agent 已停止：%1$s</string>
     <string name="chat_composer_desktop">给 Cyrene 发消息…</string>
     <string name="chat_mode_auto">自动模式</string>
     <string name="chat_mode_auto_desc">自动审核权限请求</string>
