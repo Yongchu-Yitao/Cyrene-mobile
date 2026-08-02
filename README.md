@@ -4,7 +4,7 @@ Cyrene 的 Android 工作台。App 支持与桌面端安全配对、远程对话
 项目终端，也可在手机本地保存会话、直接调用模型，并通过独立 Runtime APK 在
 QEMU + Alpine Linux 中执行文件与命令工具。
 
-## 0.2.1 功能
+## 0.2.2 功能
 
 - 与桌面端一致的对话信息层级、Markdown、工具调用、附件和图片查看体验。
 - “本地”项目可在桌面离线时运行 Agent；会话数据保存在手机，模型配置由
@@ -37,7 +37,7 @@ QEMU + Alpine Linux 中执行文件与命令工具。
 - 主 App：`app/build/outputs/apk/debug/app-debug.apk`
 - Linux Runtime：`runtime-app/build/outputs/apk/debug/runtime-app-debug.apk`
 
-正式发布使用 `v0.2.1` 标签。首次手动安装时先装 Runtime APK，再装主 App APK；
+正式发布使用 `v0.2.2` 标签。首次手动安装时先装 Runtime APK，再装主 App APK；
 App 内更新会自动下载两个包并按此顺序打开安装界面，但 Android 仍要求用户分别确认。
 只使用远程功能时可仅安装主 App。完整说明见仓库的 GitHub Releases。
 

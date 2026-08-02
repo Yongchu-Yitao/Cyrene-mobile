@@ -1013,6 +1013,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (projectId == LOCAL_PROJECT_ID) {
             return createLocalChatAndSend(content, attachments)
         }
+        val project = _state.value.selectedProject ?: return false
         val peer = _state.value.peer ?: return false
         viewModelScope.launch(Dispatchers.IO) {
             _state.value = _state.value.copy(
@@ -1025,13 +1026,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     peer, "chats.create", projectId,
                     JSONObject().put("title", ""),
                 )
-                reloadChats(peer, projectId)
                 val chat = requireNotNull(result.optJSONObject("chat")) {
-                    text(R.string.error_generic)
+                    text(R.string.error_chat_create_response)
                 }
                 ensureCurrentPeer(peer)
-                check(_state.value.selectedProject?.optString("id") == projectId)
+                require(chat.optString("id").isNotBlank()) {
+                    text(R.string.error_chat_create_response)
+                }
                 _state.value = _state.value.copy(
+                    selectedProject = project,
                     selectedChat = chat,
                     runEvents = emptyList(),
                     activeRunId = null,
@@ -1049,6 +1052,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     permissionMode = permissionMode,
                     attachments = attachments,
                 )
+                // Sending and reading the new chat are authoritative. Refreshing the list is
+                // useful for the drawer, but must not turn a successful first message into a
+                // failed creation when a background project sync races with this operation.
+                runCatching { reloadChats(peer, projectId) }
             }.onFailure { error ->
                 if (_state.value.peer?.deviceId == peer.deviceId) {
                     _state.value = _state.value.copy(

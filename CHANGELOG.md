@@ -2,6 +2,29 @@
 
 本文记录 Cyrene Mobile 的重要变更。
 
+## 0.2.2 — 2026-08-03
+
+### 安装与本地 Runtime
+
+- 修复部分 Android 系统在 Runtime APK 已安装后仍提示“Cyrene Runtime companion is not
+  installed”的问题。主 App 现在通过明确的组件名称启动 Runtime，并可唤醒刚安装但尚未
+  启动的 Runtime 包。
+- Runtime 连接失败时区分“未安装”“服务无法启动”和“两个 APK 签名不一致”，并提供完整
+  的中英文排查提示。
+
+### 远程新会话
+
+- 修复远程项目新建会话发送首条消息时，项目列表后台同步触发竞态并显示 `Check failed`、
+  页面与输入框卡住的问题。新会话现在先进入聊天界面并发送消息，列表刷新失败不会反向
+  覆盖已成功的创建结果。
+
+### 版本与验证
+
+- 主 App 版本为 `0.2.2`（versionCode 5），Runtime 版本为 `0.2.2`
+  （versionCode 3）；两个 APK 仍须安装自同一个 Release。
+- 在 Android API 35 ARM64 模拟器验证：强制停止 Runtime 后可由本地会话重新唤醒；本地
+  消息即时显示并完成回复；远程连接错误不再退化为裸 `Check failed`。
+
 ## 0.2.1 — 2026-08-03
 
 ### 本地模型与 OpenAI OAuth

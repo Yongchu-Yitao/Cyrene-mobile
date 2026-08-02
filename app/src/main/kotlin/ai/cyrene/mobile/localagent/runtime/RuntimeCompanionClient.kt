@@ -2,6 +2,7 @@ package ai.cyrene.mobile.localagent.runtime
 
 import android.content.*
 import android.os.IBinder
+import ai.cyrene.mobile.R
 import ai.cyrene.mobile.runtime.protocol.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -38,9 +39,26 @@ class RuntimeCompanionClient(private val context: Context) : AutoCloseable {
 
     suspend fun bind(timeoutMs: Long = 5_000) = withContext(Dispatchers.Main) {
         if (!bound) {
-            val intent = Intent(ACTION_BIND).setPackage(RUNTIME_PACKAGE)
-            bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
-            if (!bound) throw IllegalStateException("Cyrene Runtime companion is not installed")
+            val intent = Intent(ACTION_BIND)
+                .setComponent(ComponentName(RUNTIME_PACKAGE, RUNTIME_SERVICE_CLASS))
+                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+            bound = try {
+                context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            } catch (_: SecurityException) {
+                throw IllegalStateException(context.getString(R.string.local_agent_runtime_signature_mismatch))
+            }
+            if (!bound) {
+                @Suppress("DEPRECATION")
+                val installed = runCatching {
+                    context.packageManager.getPackageInfo(RUNTIME_PACKAGE, 0)
+                }.isSuccess
+                throw IllegalStateException(
+                    context.getString(
+                        if (installed) R.string.local_agent_runtime_service_unavailable
+                        else R.string.local_agent_runtime_not_installed,
+                    ),
+                )
+            }
         }
         withTimeout(timeoutMs) {
             while (service == null) kotlinx.coroutines.delay(20)
@@ -87,5 +105,6 @@ class RuntimeCompanionClient(private val context: Context) : AutoCloseable {
     companion object {
         const val ACTION_BIND = "ai.cyrene.mobile.runtime.BIND"
         const val RUNTIME_PACKAGE = "ai.cyrene.mobile.runtime"
+        const val RUNTIME_SERVICE_CLASS = "ai.cyrene.mobile.runtime.CyreneRuntimeService"
     }
 }
