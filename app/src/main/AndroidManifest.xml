@@ -3,6 +3,9 @@
     <queries>
         <package android:name="ai.cyrene.mobile.runtime" />
     </queries>
+    <permission
+        android:name="ai.cyrene.mobile.permission.BIND_RUNTIME"
+        android:protectionLevel="signature" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

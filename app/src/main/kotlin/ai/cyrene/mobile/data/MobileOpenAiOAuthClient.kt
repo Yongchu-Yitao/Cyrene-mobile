@@ -97,7 +97,7 @@ class MobileOpenAiOAuthClient(private val store: SecureStore) {
         val credentials = validAccessToken()
         val response = requestJson(
             "GET",
-            "$CODEX_BASE/models?client_version=0.2.2",
+            "$CODEX_BASE/models?client_version=0.2.3",
             headers = authHeaders(credentials),
         )
         response.optJSONArray("models") ?: response.optJSONArray("data") ?: JSONArray()
@@ -106,7 +106,7 @@ class MobileOpenAiOAuthClient(private val store: SecureStore) {
     fun authHeaders(credentials: JSONObject = validAccessToken()): Map<String, String> = buildMap {
         put("Authorization", "Bearer ${credentials.getString("access_token")}")
         put("originator", "codex_cli_rs")
-        put("User-Agent", "cyrene-mobile/0.2.2")
+        put("User-Agent", "cyrene-mobile/0.2.3")
         credentials.optString("account_id").takeIf(String::isNotBlank)?.let {
             put("chatgpt-account-id", it)
         }

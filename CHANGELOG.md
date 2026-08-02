@@ -2,6 +2,26 @@
 
 本文记录 Cyrene Mobile 的重要变更。
 
+## 0.2.3 — 2026-08-03
+
+### ColorOS Runtime 启动兼容
+
+- 修复 ColorOS 16 等系统阻止主 App 直接关联启动“仅含服务”的 Runtime 包，导致 Runtime
+  已安装却提示服务无法启动的问题。
+- 直接绑定失败时，主 App 会启动 Runtime 的透明激活入口；Runtime 在自己的包内拉起服务，
+  主 App 自动重试连接并返回原会话，无需用户手工打开伴随 App。
+- 主 App 与 Runtime 现在都声明同一签名级绑定权限，消除先安装主 App、后安装 Runtime 时
+  部分厂商系统不补授权限的安装顺序差异。
+- 如果 ColorOS 仍禁止关联启动，错误提示会明确要求允许 Cyrene Mobile 关联启动或后台启动
+  Cyrene Linux Runtime。
+
+### 版本与验证
+
+- 主 App 版本为 `0.2.3`（versionCode 6），Runtime 版本为 `0.2.3`
+  （versionCode 4）；两个 APK 必须来自同一个 Release。
+- 在 Android API 35 ARM64 模拟器按“主 App 在先、Runtime 在后”的顺序重新安装，确认签名
+  权限正常授予，Runtime 新安装后的 stopped 状态及透明激活组件可被正确处理。
+
 ## 0.2.2 — 2026-08-03
 
 ### 安装与本地 Runtime

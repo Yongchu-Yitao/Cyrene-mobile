@@ -627,8 +627,9 @@
     <string name="local_agent_runtime_image_required">Runtime not ready</string>
     <string name="local_agent_runtime_unavailable">Runtime unavailable</string>
     <string name="local_agent_runtime_not_installed">Cyrene Linux Runtime is not installed for the current Android user. Install the Runtime APK from the same release.</string>
-    <string name="local_agent_runtime_service_unavailable">Cyrene Linux Runtime is installed, but Android could not start its service. Reinstall both APKs from the same release for the same Android user, then allow background activity for Cyrene.</string>
+    <string name="local_agent_runtime_service_unavailable">Cyrene Linux Runtime is installed, but the system blocked linked startup. Allow Cyrene Mobile to launch Cyrene Linux Runtime or run it in the background, then try again.</string>
     <string name="local_agent_runtime_signature_mismatch">Cyrene Mobile and Linux Runtime have different signatures. Reinstall both APKs from the same GitHub release.</string>
+    <string name="local_agent_runtime_update_required">The installed Cyrene Linux Runtime is too old. Install the Runtime APK matching the main app version.</string>
     <string name="error_chat_create_response">The desktop returned an invalid chat creation response. Try again.</string>
     <string name="local_project_name">Local</string>
     <string name="local_agent_composer">Message the agent running on this device</string>

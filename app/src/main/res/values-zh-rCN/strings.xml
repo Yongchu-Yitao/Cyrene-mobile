@@ -627,8 +627,9 @@
     <string name="local_agent_runtime_image_required">Runtime 未就绪</string>
     <string name="local_agent_runtime_unavailable">Runtime 不可用</string>
     <string name="local_agent_runtime_not_installed">当前 Android 用户尚未安装 Cyrene Linux Runtime。请安装同一版本中的 Runtime APK。</string>
-    <string name="local_agent_runtime_service_unavailable">Cyrene Linux Runtime 已安装，但 Android 无法启动其服务。请为同一 Android 用户重新安装同一版本的两个 APK，并允许 Cyrene 后台运行。</string>
+    <string name="local_agent_runtime_service_unavailable">Cyrene Linux Runtime 已安装，但系统阻止了关联启动。请允许 Cyrene Mobile 关联启动或后台启动 Cyrene Linux Runtime，然后重试。</string>
     <string name="local_agent_runtime_signature_mismatch">Cyrene Mobile 与 Linux Runtime 的签名不一致。请从同一个 GitHub Release 重新安装两个 APK。</string>
+    <string name="local_agent_runtime_update_required">已安装的 Cyrene Linux Runtime 版本过旧。请安装与主 App 相同版本的 Runtime APK。</string>
     <string name="error_chat_create_response">桌面端返回的对话创建结果无效，请重试。</string>
     <string name="local_project_name">本地</string>
     <string name="local_agent_composer">向在此设备运行的 Agent 发送消息</string>
