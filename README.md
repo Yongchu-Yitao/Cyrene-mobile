@@ -1,5 +1,10 @@
 # Cyrene Mobile
 
+> **开发已迁移到 [Cyrene/mobile](https://github.com/Yongchu-Yitao/Cyrene/tree/main/mobile)。**
+> 本仓库保留历史，后续请在 Cyrene 主仓库提交修改；完整历史已导入主仓库。
+> 共享 Workbench / Python 后端更新会触发主仓库的 Android 构建。
+> 参见[统一仓库与自动构建说明](https://github.com/Yongchu-Yitao/Cyrene/blob/main/project-notes/android-monorepo.zh-CN.md)。
+
 Android 上的桌面 Workbench：复用现有前端，在本机 ARM64 QEMU / Debian 中运行 Python 后端。
 
 ## 0.3.0：单 APK
